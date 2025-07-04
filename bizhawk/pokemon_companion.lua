@@ -1,229 +1,380 @@
--- Pokemon Companion Tool for BizHawk
--- Works alongside Archipelago without conflicts
+-- Pokemon Companion Connector for BizHawk
+-- Enhanced with SNI connector patterns
+-- ULTRATHINK v5.0 - Production Ready
 
-local socket = require("socket.core")  -- This is what works!
+-- Socket loading with fallback methods
+local socket = nil
+local socket_loaded = false
 
--- Configuration
-local COMPANION_PORT = 17242
-local SEND_INTERVAL = 30  -- frames
+-- Method 1: Try standard require (if LuaSocket installed normally)
+local function try_standard_socket()
+    local success, sock = pcall(require, "socket")
+    if success and sock.tcp then
+        print("Socket loaded via standard require")
+        return sock
+    end
+    return nil
+end
 
--- State
-local tcp_socket = nil
-local connected = false
-local frame_counter = 0
-local last_send_frame = 0
-
--- Pokemon Emerald Memory Addresses
-local MEMORY = {
-    IN_BATTLE = 0x02022FEC,
-    PARTY_PLAYER = 0x02024284,
-    PARTY_ENEMY = 0x02024744
-}
-
--- Simple JSON encoder
-local function encode_json(t)
-    if type(t) == "table" then
-        local parts = {}
-        local is_array = (#t > 0)
-        
-        if is_array then
-            for i, v in ipairs(t) do
-                table.insert(parts, encode_json(v))
-            end
-            return "[" .. table.concat(parts, ",") .. "]"
+-- Method 2: Try loadlib pattern from SNI connector
+local function try_loadlib_socket()
+    local function get_os()
+        if package.config:sub(1,1) == "\\" then
+            return "windows", "dll"
         else
-            for k, v in pairs(t) do
-                table.insert(parts, '"' .. tostring(k) .. '":' .. encode_json(v))
-            end
-            return "{" .. table.concat(parts, ",") .. "}"
+            return "linux", "so"
         end
-    elseif type(t) == "string" then
-        return '"' .. t:gsub('"', '\\"') .. '"'
-    elseif type(t) == "number" then
-        return tostring(t)
-    elseif type(t) == "boolean" then
-        return t and "true" or "false"
-    elseif t == nil then
-        return "null"
-    end
-end
-
--- Connect to companion server
-local function connect_to_companion()
-    if tcp_socket then
-        tcp_socket:close()
     end
     
-    tcp_socket = socket.tcp()
-    tcp_socket:settimeout(0.1)
-    
-    local result, err = tcp_socket:connect("localhost", COMPANION_PORT)
-    
-    if result or err == "timeout" then
-        connected = true
-        tcp_socket:settimeout(0)
-        console.log("Connected to Pokemon Companion Tool on port " .. COMPANION_PORT)
-        return true
-    else
-        console.log("Failed to connect to companion server: " .. (err or "unknown"))
-        tcp_socket = nil
-        connected = false
-        return false
-    end
-end
-
--- Send message to companion server
-local function send_message(msg_type, data)
-    if not connected or not tcp_socket then
-        return false
-    end
-    
-    local message = {
-        type = msg_type,
-        data = data,
-        timestamp = os.time()
+    local the_os, ext = get_os()
+    local paths = {
+        "./socket." .. ext,
+        "./socket/core." .. ext,
+        "socket." .. ext,
+        "socket/core." .. ext
     }
     
-    local json_str = encode_json(message)
-    local packet = tostring(#json_str) .. " " .. json_str
+    for _, path in ipairs(paths) do
+        local success, result = pcall(function()
+            local loader = package.loadlib(path, "luaopen_socket_core")
+            if loader then
+                return loader()
+            end
+        end)
+        if success and result then
+            print("Socket loaded via loadlib from: " .. path)
+            return result
+        end
+    end
+    return nil
+end
+
+-- Try to load socket
+socket = try_standard_socket() or try_loadlib_socket()
+if socket then
+    socket_loaded = true
+else
+    print("ERROR: Could not load socket library!")
+    print("Please ensure LuaSocket is installed in BizHawk's Lua folder")
+end
+
+-- Configuration
+local SERVER_HOST = os.getenv("POKEMON_COMPANION_HOST") or "127.0.0.1"
+local SERVER_PORT = tonumber(os.getenv("POKEMON_COMPANION_PORT") or "17242")
+local RECONNECT_BACKOFF = 600  -- 10 seconds at 60fps
+local MAX_MESSAGES_PER_FRAME = 8
+
+-- State
+local connection = nil
+local connected = false
+local connection_backoff = 0
+local companion_name = "BizHawk-" .. os.date("%H%M%S")
+
+-- Memory domains
+local memory_domain = "System Bus"
+if not is_snes9x then
+    memory.usememorydomain(memory_domain)
+end
+
+-- Pokemon memory addresses (Pokemon Emerald - adjust for your game)
+local POKE_ADDR = {
+    party_count = 0x02024284,
+    party_data = 0x02024284 + 4,
+    battle_data = 0x02024744,
+    player_name = 0x02024C7C,
+    money = 0x02024F28,
+    badges = 0x02024F5C
+}
+
+-- Logging
+local function log(message, level)
+    level = level or "INFO"
+    print(string.format("[%s] %s", level, message))
     
-    local result, err = tcp_socket:send(packet)
+    if level == "ERROR" then
+        gui.addmessage("Companion: " .. message)
+    end
+end
+
+-- Message handling
+local function send_message(...)
+    if not connected or not connection then
+        return false
+    end
     
-    if not result then
-        console.log("Send error, disconnecting: " .. (err or "unknown"))
-        connected = false
-        tcp_socket:close()
-        tcp_socket = nil
+    local parts = {...}
+    local message = table.concat(parts, "|") .. "\n"
+    
+    local success, err = pcall(function()
+        connection:send(message)
+    end)
+    
+    if not success then
+        log("Send error: " .. tostring(err), "ERROR")
         return false
     end
     
     return true
 end
 
--- Read Pokemon data from memory
-local function read_pokemon_data(base_address)
-    -- Read species (2 bytes, little endian)
-    local species = memory.read_u16_le(base_address + 0x20)
-    
-    if species == 0 or species > 500 then
-        return nil
+-- Read Pokemon data and send update
+local function send_pokemon_update()
+    -- Read party count
+    local party_count = memory.readbyte(POKE_ADDR.party_count)
+    if party_count == nil or party_count == 0 or party_count > 6 then
+        return
     end
     
-    local pokemon = {
-        species = species,
-        level = memory.readbyte(base_address + 0x54),
-        hp = {
-            current = memory.read_u16_le(base_address + 0x56),
-            max = memory.read_u16_le(base_address + 0x58)
-        },
-        stats = {
-            attack = memory.read_u16_le(base_address + 0x5A),
-            defense = memory.read_u16_le(base_address + 0x5C),
-            speed = memory.read_u16_le(base_address + 0x5E),
-            spAttack = memory.read_u16_le(base_address + 0x60),
-            spDefense = memory.read_u16_le(base_address + 0x62)
-        },
-        nature = memory.readbyte(base_address + 0x64),
-        held_item = memory.read_u16_le(base_address + 0x22),
-        moves = {}
-    }
+    -- Read first Pokemon species
+    local species_addr = POKE_ADDR.party_data
+    local species = memory.read_u16_le(species_addr)
     
-    -- Read moves (4 moves, 2 bytes each)
-    for i = 0, 3 do
-        local move = memory.read_u16_le(base_address + 0x2C + i * 2)
-        if move > 0 and move < 1000 then
-            table.insert(pokemon.moves, move)
-        end
-    end
+    -- Read battle status (simplified)
+    local in_battle = memory.readbyte(POKE_ADDR.battle_data) > 0
     
-    return pokemon
+    -- Send update
+    send_message("PokemonData", 
+        tostring(party_count),
+        tostring(species),
+        tostring(in_battle and 1 or 0),
+        tostring(emu.framecount())
+    )
 end
 
--- Main frame callback
-local function on_frame()
-    frame_counter = frame_counter + 1
-    
-    -- Reconnect if needed (every 5 seconds)
-    if not connected and frame_counter % 300 == 0 then
-        console.log("Attempting to reconnect...")
-        connect_to_companion()
+-- Process incoming message
+local function on_message(s)
+    local parts = {}
+    for part in string.gmatch(s, '([^|]+)') do
+        parts[#parts + 1] = part
     end
     
-    -- Send data at intervals
-    if connected and frame_counter - last_send_frame >= SEND_INTERVAL then
-        last_send_frame = frame_counter
+    if #parts == 0 then return end
+    
+    local cmd = parts[1]
+    
+    if cmd == "Version" then
+        send_message("Version", companion_name, "5.0", "BizHawk-Pokemon")
         
-        -- Check if in battle
-        local in_battle = memory.readbyte(MEMORY.IN_BATTLE)
+    elseif cmd == "Ping" then
+        send_message("Pong", tostring(emu.framecount()))
         
-        if in_battle ~= 0 then
-            -- We're in battle, read Pokemon data
-            local enemy_pokemon = read_pokemon_data(MEMORY.PARTY_ENEMY)
-            local player_pokemon = read_pokemon_data(MEMORY.PARTY_PLAYER)
-            
-            if enemy_pokemon and player_pokemon then
-                local battle_data = {
-                    in_battle = true,
-                    enemy = {
-                        active = enemy_pokemon
-                    },
-                    player = {
-                        active = player_pokemon
-                    }
-                }
-                
-                if send_message("battle_update", battle_data) then
-                    -- Successfully sent
+    elseif cmd == "RequestData" then
+        send_pokemon_update()
+        
+    elseif cmd == "Read" then
+        -- Read memory: Read|address|length
+        if #parts >= 3 then
+            local addr = tonumber(parts[2])
+            local length = tonumber(parts[3])
+            if addr and length then
+                local data = memory.readbyterange(addr, length)
+                local hex_data = {}
+                for i = 0, length - 1 do
+                    table.insert(hex_data, string.format("%02x", data[i]))
                 end
-            end
-        else
-            -- Not in battle, send heartbeat
-            if frame_counter - last_send_frame >= SEND_INTERVAL * 4 then
-                send_message("heartbeat", { in_battle = false })
+                send_message("ReadResponse", table.concat(hex_data))
             end
         end
+        
+    elseif cmd == "Write" then
+        -- Write memory: Write|address|byte1|byte2|...
+        if #parts >= 3 then
+            local addr = tonumber(parts[2])
+            if addr then
+                for i = 3, #parts do
+                    local value = tonumber(parts[i])
+                    if value then
+                        memory.writebyte(addr + i - 3, value)
+                    end
+                end
+                send_message("WriteResponse", "OK")
+            end
+        end
+        
+    elseif cmd == "Message" then
+        if parts[2] then
+            gui.addmessage("Companion: " .. parts[2])
+            print("Server message: " .. parts[2])
+        end
+        
+    elseif cmd == "SetName" then
+        if parts[2] then
+            companion_name = parts[2]
+            log("Name set to: " .. companion_name)
+        end
+        
+    else
+        log("Unknown command: " .. cmd, "WARN")
     end
 end
 
--- Cleanup function
-local function cleanup()
-    console.log("Pokemon Companion script stopping...")
-    if tcp_socket then
-        send_message("disconnect", { reason = "script_stopped" })
-        tcp_socket:close()
-        tcp_socket = nil
+-- Connection management
+local function do_connect()
+    if not socket_loaded then
+        return false
     end
+    
+    if connection_backoff > 0 then
+        connection_backoff = connection_backoff - 1
+        return false
+    end
+    
+    log("Connecting to Pokemon Companion at " .. SERVER_HOST .. ":" .. SERVER_PORT .. "...")
+    
+    local conn, err = socket.tcp()
+    if not conn then
+        log("Failed to create socket: " .. tostring(err), "ERROR")
+        connection_backoff = RECONNECT_BACKOFF
+        return false
+    end
+    
+    -- Set socket options like SNI connector
+    conn:setoption('keepalive', true)
+    conn:setoption('tcp-nodelay', true)
+    conn:settimeout(0.01)  -- 10ms timeout for connection
+    
+    local success, err = conn:connect(SERVER_HOST, SERVER_PORT)
+    if err and err ~= "timeout" then
+        log("Connection failed: " .. tostring(err), "ERROR")
+        conn:close()
+        connection_backoff = RECONNECT_BACKOFF
+        return false
+    end
+    
+    -- Connected!
+    connection = conn
+    connected = true
+    connection_backoff = 0
+    
+    -- Set to non-blocking mode
+    connection:settimeout(0)
+    
+    local ip, port = connection:getsockname()
+    log("Connected to Pokemon Companion from " .. ip .. ":" .. port, "SUCCESS")
+    
+    -- Send initial handshake
+    send_message("Hello", companion_name, "BizHawk", gameinfo.getromname())
+    
+    return true
+end
+
+local function do_disconnect()
+    if connection then
+        log("Disconnecting from Pokemon Companion...")
+        pcall(function()
+            send_message("Goodbye", companion_name)
+            connection:close()
+        end)
+        connection = nil
+    end
+    connected = false
+end
+
+-- Main update loop (called every frame)
+local frame_counter = 0
+local function main_update()
+    if not socket_loaded then
+        return
+    end
+    
+    -- Handle connection
+    if not connected then
+        do_connect()
+        return
+    end
+    
+    -- Process incoming messages (up to 8 per frame like SNI)
+    local messages_processed = 0
+    while messages_processed < MAX_MESSAGES_PER_FRAME do
+        messages_processed = messages_processed + 1
+        
+        local s, status = connection:receive('*l')
+        
+        if status == 'timeout' then
+            break  -- No more messages
+        elseif status == 'closed' then
+            log("Server closed connection", "WARN")
+            do_disconnect()
+            connection_backoff = RECONNECT_BACKOFF
+            break
+        elseif s then
+            on_message(s)
+        end
+    end
+    
+    -- Send periodic updates (every 30 frames = 0.5 seconds)
+    frame_counter = frame_counter + 1
+    if frame_counter >= 30 then
+        frame_counter = 0
+        send_pokemon_update()
+    end
+end
+
+-- GUI overlay
+local function draw_status()
+    local color = connected and 0xFF00FF00 or 0xFFFF0000
+    local status = connected and "Connected" or "Disconnected"
+    
+    gui.pixelText(2, 2, "Companion: " .. status, color)
+    
+    if not socket_loaded then
+        gui.pixelText(2, 12, "Socket not loaded!", 0xFFFFFF00)
+    elseif not connected and connection_backoff > 0 then
+        gui.pixelText(2, 12, string.format("Retry in %d", connection_backoff/60), 0xFFFFFF00)
+    end
+end
+
+-- Cleanup on exit
+local function on_exit()
+    log("Pokemon Companion shutting down...")
+    do_disconnect()
 end
 
 -- Initialize
-console.clear()
-console.log("==============================================")
-console.log("Pokemon Companion Tool v1.0")
-console.log("==============================================")
-console.log("This script runs alongside Archipelago")
-console.log("Make sure the companion server is running on port " .. COMPANION_PORT)
+print("========================================")
+print("Pokemon Companion Connector v5.0")
+print("Enhanced with SNI connector patterns")
+print("========================================")
 
--- Check system
-if emu.getsystemid() ~= "GBA" then
-    console.log("ERROR: This script is for GBA games only!")
-    console.log("Current system: " .. emu.getsystemid())
-    return
-end
-
-console.log("System check: OK (GBA)")
-
--- Initial connection attempt
-if connect_to_companion() then
-    console.log("Successfully connected to companion server!")
+if not socket_loaded then
+    print("ERROR: Socket library not available!")
+    print("Please install LuaSocket in BizHawk's Lua folder")
+    print("Download from: https://github.com/diegonehab/luasocket/releases")
 else
-    console.log("Could not connect to companion server")
-    console.log("Make sure the server is running (npm start)")
-    console.log("Will retry every 5 seconds...")
+    print("Socket library loaded successfully")
+    print("Target server: " .. SERVER_HOST .. ":" .. SERVER_PORT)
 end
 
--- Register callbacks
-event.onframestart(on_frame)
-event.onexit(cleanup)
+-- Wait for ROM
+if emu.getsystemid() == "NULL" then
+    print("Waiting for ROM...")
+    while emu.getsystemid() == "NULL" do
+        emu.frameadvance()
+    end
+end
 
-console.log("Script is now running!")
-console.log("Enter a Pokemon battle to see companion data")
+print("ROM: " .. gameinfo.getromname())
+print("System: " .. emu.getsystemid())
+
+-- Register events
+event.onexit(on_exit)
+
+-- Main loop
+if emu.getsystemid() == "GB" or emu.getsystemid() == "GBC" or emu.getsystemid() == "SGB" then
+    -- GB/GBC use vblank to avoid timing issues
+    event.onmemoryexecute(function()
+        main_update()
+        draw_status()
+    end, 0x40, "vblank", "System Bus")
+else
+    -- Other systems use frame end
+    event.onframeend(function()
+        main_update()
+        draw_status()
+    end)
+end
+
+-- Frame advance loop
+while true do
+    emu.frameadvance()
+end
