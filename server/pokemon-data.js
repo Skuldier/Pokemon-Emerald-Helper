@@ -55,18 +55,42 @@ function calculateBST(stats) {
 }
 
 function calculateTierRating(pokemon, pokemonInfo) {
-  // Randomizer-specific tier calculation
-  const stats = pokemon.stats || pokemonInfo.stats;
+  // Build stats object from either pokemon data or base stats
+  let stats;
+  if (pokemon.stats) {
+    // If pokemon has a stats object, use it
+    stats = pokemon.stats;
+  } else if (pokemon.hp_max) {
+    // If pokemon has individual stat fields from Lua script
+    stats = {
+      hp: pokemon.hp_max,
+      attack: pokemon.attack,
+      defense: pokemon.defense,
+      spAttack: pokemon.sp_attack,
+      spDefense: pokemon.sp_defense,
+      speed: pokemon.speed
+    };
+  } else {
+    // Fall back to base stats
+    stats = pokemonInfo.stats;
+  }
+  
   const bst = calculateBST(stats);
   
   // Weight different aspects for randomizer play
   const bstScore = Math.min(bst / 600, 1.0) * 100; // Normalize to 100
   const hpWeight = (stats.hp / 255) * 150; // HP is crucial in randomizers
   const speedWeight = (stats.speed / 200) * 130; // Speed for survival
-  const defenseWeight = ((stats.defense + stats.sp_defense) / 400) * 120;
+  const defenseWeight = ((stats.defense + stats.spDefense) / 400) * 120;
   
-  // Move pool score (simplified - you'd want more complex logic)
-  const moveScore = pokemon.moves.length * 25;
+  // Move pool score - handle missing moves data
+  let moveScore = 50; // Default score if no move data
+  if (pokemon.moves && Array.isArray(pokemon.moves)) {
+    moveScore = pokemon.moves.length * 25;
+  } else if (pokemon.moves && typeof pokemon.moves === 'object') {
+    // Handle moves as object (from Lua table)
+    moveScore = Object.keys(pokemon.moves).length * 25;
+  }
   
   // Type defensive score
   const typeScore = calculateTypeDefensiveScore(pokemonInfo.types) * 100;

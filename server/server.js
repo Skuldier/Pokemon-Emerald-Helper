@@ -1,6 +1,3 @@
-// server/server.js
-// Pokemon Companion Tool - Direct Server (No SNI)
-
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
@@ -21,8 +18,8 @@ const io = socketIo(server, {
 });
 
 // Configuration
-const TCP_PORT = 17242;  // For BizHawk Lua script connections
-const HTTP_PORT = 3001;  // For web UI
+const TCP_PORT = 17242;
+const HTTP_PORT = 3001;
 
 // State
 let bizhawkClient = null;
@@ -31,27 +28,23 @@ let connectionStatus = 'disconnected';
 
 // Create TCP server for BizHawk connection
 const tcpServer = net.createServer((socket) => {
-  console.log('BizHawk connected from:', socket.remoteAddress);
+  console.log('BizHawk attempting to connect...');
   bizhawkClient = socket;
-  connectionStatus = 'connected';
-  
-  // Notify web clients
-  io.emit('connection-status', { status: 'connected' });
   
   let buffer = '';
   
   socket.on('data', (data) => {
     buffer += data.toString();
     
-    // Process line-based protocol from your Lua script
+    // Process complete lines
     const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
+    buffer = lines.pop(); // Keep incomplete line in buffer
     
-    for (const line of lines) {
+    lines.forEach(line => {
       if (line.trim()) {
         handleBizHawkMessage(line.trim());
       }
-    }
+    });
   });
   
   socket.on('end', () => {
@@ -64,68 +57,56 @@ const tcpServer = net.createServer((socket) => {
   });
   
   socket.on('error', (err) => {
-    console.error('BizHawk socket error:', err);
+    console.error('TCP Socket error:', err);
   });
+  
+  // Send version info when client connects
+  socket.write('Version|PokemonCompanion|1.0|Server\n');
 });
 
-// Handle messages from BizHawk Lua script
 function handleBizHawkMessage(message) {
-  console.log('BizHawk message:', message);
+  console.log('Received from BizHawk:', message);
   
+  // Split message by pipe
   const parts = message.split('|');
   const command = parts[0];
   
   switch (command) {
     case 'Hello':
-      // Handshake from Lua script
-      const [_, name, platform, rom] = parts;
-      console.log(`Hello from ${name} on ${platform}, playing ${rom}`);
-      sendToBizHawk('Version|PokemonCompanion|1.0|Server');
-      break;
-      
-    case 'Version':
-      // Version info from Lua script
-      console.log('BizHawk version:', parts.slice(1).join('|'));
-      break;
-      
-    case 'PokemonData':
-      // Battle data update: PokemonData|count|species|inBattle|frame
-      const [_cmd, count, species, inBattle, frame] = parts;
-      console.log(`Pokemon data: ${count} pokemon, species ${species}, battle: ${inBattle}`);
-      
-      // You can expand this to send full battle data
-      if (inBattle === '1') {
-        sendToBizHawk('RequestData');
-      }
+      console.log('BizHawk connected successfully');
+      connectionStatus = 'connected';
+      io.emit('connection-status', { status: 'connected' });
       break;
       
     case 'BattleUpdate':
-      // Detailed battle data (you'll need to expand the Lua script for this)
       try {
-        const battleData = JSON.parse(parts[1]);
+        const jsonData = parts.slice(1).join('|'); // Rejoin in case JSON contains pipes
+        const battleData = JSON.parse(jsonData);
         processBattleData(battleData);
       } catch (e) {
         console.error('Failed to parse battle data:', e);
       }
       break;
       
-    case 'Read':
-      // Handle read requests from Lua if needed
-      const [_r, address, length] = parts;
-      console.log(`Read request: ${address} for ${length} bytes`);
-      // For now, just acknowledge
-      sendToBizHawk('ReadResponse|OK');
-      break;
-      
     case 'BattleEnd':
-      // Battle ended
-      console.log('\n=== BATTLE ENDED ===\n');
+      console.log('Battle ended');
       battleState = null;
       io.emit('battle-update', null);
       break;
       
+    case 'PartyUpdate':
+      try {
+        const jsonData = parts.slice(1).join('|');
+        const partyData = JSON.parse(jsonData);
+        console.log('Party update received:', partyData.party.length, 'Pokemon');
+        // Handle party data if needed
+      } catch (e) {
+        console.error('Failed to parse party data:', e);
+      }
+      break;
+      
     case 'Goodbye':
-      console.log('BizHawk said goodbye');
+      console.log('BizHawk disconnecting gracefully');
       break;
       
     default:
@@ -133,67 +114,55 @@ function handleBizHawkMessage(message) {
   }
 }
 
-// Send message to BizHawk
-function sendToBizHawk(message) {
-  if (bizhawkClient && bizhawkClient.writable) {
-    bizhawkClient.write(message + '\n');
-    console.log('Sent to BizHawk:', message);
-  }
-}
-
-// Process battle data
-function processBattleData(rawData) {
-  if (!rawData || !rawData.enemy || !rawData.player) {
-    console.log('Invalid battle data received');
+function processBattleData(data) {
+  if (!data || !data.enemy || !data.player) {
+    console.log('Invalid battle data');
     return;
   }
   
-  const enemyPokemon = rawData.enemy;
-  const playerPokemon = rawData.player;
-  
-  // Get Pokemon info from data files
-  const enemyInfo = pokemonData.getPokemonInfo(enemyPokemon.species);
-  const playerInfo = pokemonData.getPokemonInfo(playerPokemon.species);
-  
-  console.log(`\n=== BATTLE UPDATE ===`);
-  console.log(`Player: ${playerInfo.name} (Lv.${playerPokemon.level}) HP: ${playerPokemon.hp_current}/${playerPokemon.hp_max}`);
-  console.log(`Enemy: ${enemyInfo.name} (Lv.${enemyPokemon.level}) HP: ${enemyPokemon.hp_current}/${enemyPokemon.hp_max}`);
-  
-  // Calculate tier rating
-  const tierRating = pokemonData.calculateTierRating(enemyPokemon, enemyInfo);
-  console.log(`Enemy Tier: ${tierRating.overall} (Total Stats: ${tierRating.totalStats})`);
-  
-  // Calculate type effectiveness
-  const effectiveness = pokemonData.calculateTypeEffectiveness(
-    playerInfo.types,
-    enemyInfo.types
-  );
-  
-  console.log(`Type Matchup: Player ${effectiveness.attacking}x damage, Enemy ${effectiveness.defending}x damage`);
-  console.log(`====================\n`);
-  
-  battleState = {
-    enemy: {
-      ...enemyPokemon,
-      info: enemyInfo,
-      tierRating
-    },
-    player: {
-      ...playerPokemon,
-      info: playerInfo
-    },
-    effectiveness,
-    timestamp: Date.now()
-  };
-  
-  // Send to web UI
-  io.emit('battle-update', battleState);
+  try {
+    // Get Pokemon info from data files
+    const enemyInfo = pokemonData.getPokemonInfo(data.enemy.species);
+    const playerInfo = pokemonData.getPokemonInfo(data.player.species);
+    
+    // Calculate tier rating for enemy
+    const enemyTierRating = pokemonData.calculateTierRating(data.enemy, enemyInfo);
+    
+    // Calculate type effectiveness
+    const effectiveness = pokemonData.calculateTypeEffectiveness(
+      playerInfo.types,
+      enemyInfo.types
+    );
+    
+    // Build complete battle state
+    battleState = {
+      enemy: {
+        ...data.enemy,
+        info: enemyInfo,
+        tierRating: enemyTierRating
+      },
+      player: {
+        ...data.player,
+        info: playerInfo
+      },
+      effectiveness,
+      timestamp: Date.now()
+    };
+    
+    console.log(`Battle: ${playerInfo.name} (Lv.${data.player.level}) vs ${enemyInfo.name} (Lv.${data.enemy.level})`);
+    console.log(`Enemy Tier: ${enemyTierRating.tier} (Score: ${enemyTierRating.score})`);
+    
+    // Send to all connected web clients
+    io.emit('battle-update', battleState);
+  } catch (e) {
+    console.error('Error processing battle data:', e);
+  }
 }
 
 // REST API endpoints
 app.get('/api/status', (req, res) => {
   res.json({
-    bizhawkConnected: bizhawkClient !== null,
+    connection: connectionStatus,
     hasBattleData: battleState !== null
   });
 });
@@ -202,7 +171,13 @@ app.get('/api/battle', (req, res) => {
   res.json(battleState);
 });
 
-// Socket.IO for web UI
+app.get('/api/pokemon/:id', (req, res) => {
+  const id = parseInt(req.params.id);
+  const info = pokemonData.getPokemonInfo(id);
+  res.json(info);
+});
+
+// Socket.IO for real-time updates
 io.on('connection', (socket) => {
   console.log('Web client connected');
   
@@ -217,31 +192,26 @@ io.on('connection', (socket) => {
   });
 });
 
-// Start TCP server for BizHawk
+// Start servers
 tcpServer.listen(TCP_PORT, () => {
-  console.log(`TCP server listening on port ${TCP_PORT} for BizHawk connections`);
+  console.log(`TCP server listening on port ${TCP_PORT} for BizHawk connection`);
 });
 
-// Start HTTP server for web UI
 server.listen(HTTP_PORT, () => {
-  console.log(`HTTP server listening on port ${HTTP_PORT} for web UI`);
-  console.log('');
-  console.log('Ready for connections!');
-  console.log('1. Make sure BizHawk is running with Pokemon Emerald');
-  console.log('2. Load pokemon_companion.lua in BizHawk');
-  console.log('3. Open http://localhost:3000 in your browser');
+  console.log(`HTTP server listening on port ${HTTP_PORT} for web clients`);
+  console.log('\nWaiting for BizHawk to connect...');
 });
 
-// Cleanup on exit
+// Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\nShutting down...');
   
   if (bizhawkClient) {
-    sendToBizHawk('Goodbye|Server');
-    bizhawkClient.destroy();
+    bizhawkClient.end();
   }
   
   tcpServer.close();
   server.close();
+  
   process.exit(0);
 });

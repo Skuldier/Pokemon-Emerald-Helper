@@ -2,11 +2,13 @@ import React from 'react';
 import './ConnectionStatus.css';
 
 function ConnectionStatus({ status }) {
+  const isConnected = status === 'connected';
+  
   return (
-    <div className={`connection-status ${status}`}>
-      <span className="status-dot"></span>
+    <div className={`connection-status ${isConnected ? 'connected' : 'disconnected'}`}>
+      <span className="status-indicator"></span>
       <span className="status-text">
-        {status === 'connected' ? 'BizHawk Connected' : 'BizHawk Disconnected'}
+        {isConnected ? 'BizHawk Connected' : 'BizHawk Disconnected'}
       </span>
     </div>
   );

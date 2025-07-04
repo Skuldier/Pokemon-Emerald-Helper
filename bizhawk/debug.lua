@@ -1,184 +1,234 @@
--- Active Pokemon Memory Finder
--- This script actively searches for Pokemon in memory
+-- Warning-Free Pokemon Scanner
+-- Strictly respects 32KB memory limit to avoid warnings
 
-print("Active Pokemon Memory Finder")
+print("Warning-Free Pokemon Scanner")
 print("===========================")
-print("This will scan memory for Pokemon-like structures")
-print("Press B to begin scanning")
+print("Memory range: 0x0000 - 0x7FFF")
+print("No out-of-bounds reads!")
 print("")
 
--- Common early-game Pokemon IDs
-local common_pokemon = {
-    252, 253, 254, -- Treecko line
-    255, 256, 257, -- Torchic line
-    258, 259, 260, -- Mudkip line
-    261, 262,      -- Poochyena line
-    263, 264,      -- Zigzagoon line
-    265, 266, 267, 268, 269, -- Wurmple lines
-    270, 271, 272, -- Lotad line
-    273, 274, 275, -- Seedot line
-    276, 277,      -- Taillow line
-    278, 279,      -- Wingull line
-    280, 281, 282, -- Ralts line
-    283, 284,      -- Surskit line
-    285, 286,      -- Shroomish line
-}
+-- Constants
+local MEM_START = 0x0000
+local MEM_END = 0x7FFF
+local MEM_SIZE = 0x8000
 
--- Create lookup for quick checking
-local is_common = {}
-for _, id in ipairs(common_pokemon) do
-    is_common[id] = true
+-- Strictly bounded read functions
+local function read_byte(addr)
+    if addr >= MEM_START and addr <= MEM_END then
+        return mainmemory.readbyte(addr)
+    end
+    return nil
 end
 
--- Scan for Pokemon-like structures
-local function scan_for_pokemon()
-    print("\nScanning memory for Pokemon structures...")
-    local found = {}
+local function read_u16(addr)
+    if addr >= MEM_START and addr <= MEM_END - 1 then
+        return mainmemory.read_u16_le(addr)
+    end
+    return nil
+end
+
+-- Pokemon data for Gen 1/2
+local pokemon_data = {
+    -- Gen 1 internal IDs (different from Pokedex numbers!)
+    [0x99] = "Bulbasaur",
+    [0x09] = "Ivysaur",
+    [0x9A] = "Venusaur",
+    [0xB0] = "Charmander",
+    [0xB2] = "Charmeleon",
+    [0xB4] = "Charizard",
+    [0xB1] = "Squirtle",
+    [0xB3] = "Wartortle",
+    [0x1C] = "Blastoise",
+    [0x7B] = "Caterpie",
+    [0x7C] = "Metapod",
+    [0x7D] = "Butterfree",
+    [0x70] = "Weedle",
+    [0x71] = "Kakuna",
+    [0x72] = "Beedrill",
+    [0x24] = "Pidgey",
+    [0x96] = "Pidgeotto",
+    [0x97] = "Pidgeot",
+    [0xA5] = "Rattata",
+    [0xA6] = "Raticate",
+    [0x05] = "Spearow",
+    [0x23] = "Fearow",
+    [0x6C] = "Ekans",
+    [0x2D] = "Arbok",
+    [0x54] = "Pikachu",
+    [0x55] = "Raichu",
+}
+
+-- Quick scan function
+local function quick_scan()
+    print("Starting quick scan...")
+    local results = {}
     
-    -- Focus on WRAM area where game data is stored
-    local scan_start = 0x02000000
-    local scan_end = 0x02040000
-    local step = 0x100  -- Check every 256 bytes
+    -- Common Pokemon data locations
+    local scan_areas = {
+        {start = 0xD000, end_ = 0xDFFF, name = "WRAM Bank D"},
+        {start = 0xC000, end_ = 0xCFFF, name = "WRAM Bank C"},
+        {start = 0x0000, end_ = 0x3FFF, name = "ROM Bank 0"},
+    }
     
-    for addr = scan_start, scan_end, step do
-        -- Read potential species value
-        local species = mainmemory.read_u16_le(addr)
+    for _, area in ipairs(scan_areas) do
+        print("Scanning " .. area.name .. "...")
         
-        -- Check if it's a common Pokemon
-        if is_common[species] then
-            -- Verify it looks like a Pokemon structure
-            -- Check multiple possible offsets
-            local checks = {
-                {species_off = 0, level_off = 0x54, hp_off = 0x56},
-                {species_off = 0, level_off = 0x34, hp_off = 0x36},
-                {species_off = -0x20, level_off = 0x34, hp_off = 0x36}
-            }
+        for addr = area.start, math.min(area.end_, MEM_END), 1 do
+            local value = read_byte(addr)
             
-            for _, offsets in ipairs(checks) do
-                local level = mainmemory.readbyte(addr + offsets.level_off)
-                local hp = mainmemory.read_u16_le(addr + offsets.hp_off)
+            if value and pokemon_data[value] then
+                -- Found a Pokemon ID!
+                local next_bytes = {}
+                for i = 1, 5 do
+                    local b = read_byte(addr + i)
+                    if b then
+                        table.insert(next_bytes, b)
+                    end
+                end
                 
-                if level >= 2 and level <= 10 and hp > 0 and hp < 50 then
-                    -- This looks like a valid early-game Pokemon!
-                    table.insert(found, {
+                table.insert(results, {
+                    address = addr,
+                    value = value,
+                    name = pokemon_data[value],
+                    context = next_bytes
+                })
+                
+                print(string.format("  Found %s (0x%02X) at 0x%04X", 
+                    pokemon_data[value], value, addr))
+            end
+        end
+    end
+    
+    return results
+end
+
+-- Pattern matching for Pokemon structures
+local function find_patterns()
+    print("\nSearching for Pokemon patterns...")
+    local patterns = {}
+    
+    -- Look for level/HP patterns (common in Pokemon data)
+    for addr = MEM_START, MEM_END - 10, 1 do
+        local byte1 = read_byte(addr)
+        local byte2 = read_byte(addr + 1)
+        local byte3 = read_byte(addr + 2)
+        
+        if byte1 and byte2 and byte3 then
+            -- Level pattern: value between 1-100
+            if byte1 >= 1 and byte1 <= 100 then
+                -- HP pattern: reasonable HP values
+                if byte2 > 0 and byte2 <= 255 and byte3 <= byte2 then
+                    table.insert(patterns, {
                         address = addr,
-                        species = species,
-                        level = level,
-                        hp = hp,
-                        offset_type = offsets
+                        level = byte1,
+                        hp_current = byte3,
+                        hp_max = byte2,
+                        type = "Level/HP"
                     })
-                    print(string.format("Found Pokemon #%d at 0x%08X (Lv.%d, HP:%d)", 
-                        species, addr, level, hp))
                 end
             end
         end
     end
     
-    return found
+    return patterns
 end
 
--- Monitor specific address for changes
-local function monitor_address(addr, name)
-    local species = mainmemory.read_u16_le(addr)
-    local species2 = mainmemory.read_u16_le(addr + 0x20)
-    
-    if species > 0 and species <= 500 then
-        return string.format("%s: #%d", name, species)
-    elseif species2 > 0 and species2 <= 500 then
-        return string.format("%s+0x20: #%d", name, species2)
-    else
-        return nil
-    end
-end
+-- Main execution
+print("Press B to start quick scan")
+print("Press A to find patterns")
+print("Press X to monitor memory")
 
--- Connect to server and send update
-local function send_battle_update(enemy_addr, player_addr)
-    -- Try to load socket
-    local socket_ok, socket = pcall(require, "socket.core")
-    if not socket_ok then
-        print("Socket not available, skipping network update")
-        return
-    end
-    
-    -- Read Pokemon data
-    local enemy_species = mainmemory.read_u16_le(enemy_addr)
-    local player_species = mainmemory.read_u16_le(player_addr)
-    
-    if enemy_species > 0 and enemy_species <= 500 and 
-       player_species > 0 and player_species <= 500 then
-        print(string.format("Battle detected! Player #%d vs Enemy #%d", 
-            player_species, enemy_species))
-        print(string.format("Enemy at: 0x%08X", enemy_addr))
-        print(string.format("Player at: 0x%08X", player_addr))
-    end
-end
+local mode = "idle"
+local scan_results = {}
+local pattern_results = {}
+local monitor_addr = 0xD000
 
--- Main state
-local scanning = false
-local found_pokemon = {}
-local last_scan_frame = 0
-
--- Main loop
 while true do
     local keys = input.get()
     
-    -- Handle scanning
-    if keys["B"] and not scanning then
-        scanning = true
-        found_pokemon = scan_for_pokemon()
-        last_scan_frame = emu.framecount()
-    elseif not keys["B"] then
-        scanning = false
+    -- Handle input
+    if keys["B"] and mode == "idle" then
+        mode = "scanning"
+        scan_results = quick_scan()
+        mode = "results"
+    elseif keys["A"] and mode == "idle" then
+        mode = "patterns"
+        pattern_results = find_patterns()
+    elseif keys["X"] then
+        mode = "monitor"
+    elseif keys["Start"] then
+        mode = "idle"
     end
     
-    -- Display GUI
-    local y = 10
-    gui.pixelText(2, y, "Pokemon Memory Finder", 0xFFFFFF00)
-    y = y + 10
-    gui.pixelText(2, y, "Press B to scan for Pokemon", 0xFFFFFFFF)
-    y = y + 20
-    
-    -- Show known addresses
-    gui.pixelText(2, y, "Standard addresses:", 0xFF00FFFF)
-    y = y + 10
-    
-    local checks = {
-        {0x02024744, "Enemy1"},
-        {0x020244EC, "Enemy2"},
-        {0x02023BE4, "Battle1"},
-        {0x02023C48, "Battle2"},
-        {0x02024284 + 8, "Party1"}
-    }
-    
-    for _, check in ipairs(checks) do
-        local result = monitor_address(check[1], check[2])
-        if result then
-            gui.pixelText(2, y, result, 0xFF00FF00)
-            y = y + 10
-        end
+    -- Update monitor address
+    if mode == "monitor" then
+        if keys["Up"] then monitor_addr = math.max(MEM_START, monitor_addr - 16) end
+        if keys["Down"] then monitor_addr = math.min(MEM_END - 16, monitor_addr + 16) end
+        if keys["Left"] then monitor_addr = math.max(MEM_START, monitor_addr - 1) end
+        if keys["Right"] then monitor_addr = math.min(MEM_END, monitor_addr + 1) end
     end
     
-    -- Show found Pokemon
-    if #found_pokemon > 0 then
-        y = y + 10
-        gui.pixelText(2, y, "Found Pokemon:", 0xFFFFFF00)
+    -- Display
+    gui.drawBox(0, 0, 256, 224, 0x80000000, 0x80000000)
+    
+    local y = 2
+    gui.pixelText(2, y, "Warning-Free Scanner - " .. mode, 0xFFFFFF00)
+    y = y + 10
+    
+    if mode == "idle" then
+        gui.pixelText(2, y, "B=Scan A=Patterns X=Monitor", 0xFF888888)
+    elseif mode == "results" then
+        gui.pixelText(2, y, "Found Pokemon:", 0xFF00FF00)
         y = y + 10
         
-        for i = 1, math.min(5, #found_pokemon) do
-            local p = found_pokemon[i]
-            local current = mainmemory.read_u16_le(p.address)
-            local color = (current == p.species) and 0xFF00FF00 or 0xFFFF0000
-            gui.pixelText(2, y, string.format("0x%08X: #%d", p.address, current), color)
+        for i = 1, math.min(10, #scan_results) do
+            local r = scan_results[i]
+            gui.pixelText(2, y, string.format("0x%04X: %s", r.address, r.name), 0xFF00FFFF)
             y = y + 10
         end
+        
+        if #scan_results > 10 then
+            gui.pixelText(2, y, "... and " .. (#scan_results - 10) .. " more", 0xFF888888)
+        end
+    elseif mode == "patterns" then
+        gui.pixelText(2, y, "Found Patterns:", 0xFF00FF00)
+        y = y + 10
+        
+        for i = 1, math.min(8, #pattern_results) do
+            local p = pattern_results[i]
+            gui.pixelText(2, y, string.format("0x%04X: Lv.%d HP:%d/%d", 
+                p.address, p.level, p.hp_current, p.hp_max), 0xFF00FFFF)
+            y = y + 10
+        end
+    elseif mode == "monitor" then
+        gui.pixelText(2, y, string.format("Monitor: 0x%04X", monitor_addr), 0xFF00FF00)
+        y = y + 10
+        
+        -- Show 8x8 grid of bytes
+        for row = 0, 7 do
+            local x = 2
+            for col = 0, 7 do
+                local addr = monitor_addr + (row * 8) + col
+                if addr <= MEM_END then
+                    local value = read_byte(addr)
+                    if value then
+                        local color = 0xFFFFFFFF
+                        if pokemon_data[value] then color = 0xFF00FFFF end
+                        gui.pixelText(x, y, string.format("%02X", value), color)
+                    end
+                end
+                x = x + 20
+            end
+            y = y + 10
+        end
+        
+        y = y + 10
+        gui.pixelText(2, y, "Use D-Pad to navigate", 0xFF888888)
     end
     
-    -- Auto-detect battles
-    local enemy_species = mainmemory.read_u16_le(0x02024744 + 0x20)
-    if enemy_species > 0 and enemy_species <= 500 then
-        gui.pixelText(200, 20, "BATTLE ACTIVE!", 0xFF00FF00)
-        gui.pixelText(200, 30, "Enemy: #" .. enemy_species, 0xFF00FF00)
-    end
+    -- Memory info
+    gui.pixelText(180, 2, "Mem: 32KB", 0xFF888888)
+    gui.pixelText(180, 12, "0x0000-0x7FFF", 0xFF888888)
     
     emu.frameadvance()
 end

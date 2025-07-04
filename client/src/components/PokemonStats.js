@@ -1,59 +1,74 @@
 import React from 'react';
 import './PokemonStats.css';
 
-function PokemonStats({ pokemon, showDetails = true }) {
-  const stats = pokemon.stats || pokemon.info.stats;
-  const maxStat = 255; // Max stat value in Gen 3
+function PokemonStats({ pokemon, showDetails }) {
+  if (!pokemon) {
+    return <div className="pokemon-stats">No data</div>;
+  }
 
-  const statNames = {
-    hp: 'HP',
-    attack: 'Attack',
-    defense: 'Defense',
-    spAttack: 'Sp. Atk',
-    spDefense: 'Sp. Def',
-    speed: 'Speed'
+  // Get stats from either nested stats object or flat properties
+  const stats = pokemon.stats || {
+    hp: pokemon.hp_max,
+    attack: pokemon.attack,
+    defense: pokemon.defense,
+    speed: pokemon.speed,
+    sp_attack: pokemon.sp_attack,
+    sp_defense: pokemon.sp_defense
   };
 
   return (
     <div className="pokemon-stats">
-      <h4>Stats</h4>
-      <div className="stats-grid">
-        {Object.entries(stats).map(([stat, value]) => (
-          <div key={stat} className="stat-row">
-            <span className="stat-name">{statNames[stat] || stat}</span>
-            <span className="stat-value">{value}</span>
-            {showDetails && (
-              <div className="stat-bar">
-                <div 
-                  className="stat-fill"
-                  style={{ 
-                    width: `${(value / maxStat) * 100}%`,
-                    backgroundColor: getStatColor(value)
-                  }}
-                />
-              </div>
-            )}
-          </div>
-        ))}
+      <h4>{showDetails ? 'Detailed Stats' : 'Quick Stats'}</h4>
+      
+      <div className="stat-item">
+        <span className="stat-label">HP</span>
+        <span className="stat-value">{stats.hp || stats.hp_max || '?'}</span>
       </div>
+
+      <div className="stat-item">
+        <span className="stat-label">Attack</span>
+        <span className="stat-value">{stats.attack || '?'}</span>
+      </div>
+
+      <div className="stat-item">
+        <span className="stat-label">Defense</span>
+        <span className="stat-value">{stats.defense || '?'}</span>
+      </div>
+
+      <div className="stat-item">
+        <span className="stat-label">Speed</span>
+        <span className="stat-value">{stats.speed || '?'}</span>
+      </div>
+
       {showDetails && (
-        <div className="stat-total">
-          <span>Base Stat Total:</span>
-          <span className="total-value">
-            {Object.values(stats).reduce((sum, stat) => sum + stat, 0)}
-          </span>
-        </div>
+        <>
+          <div className="stat-item">
+            <span className="stat-label">Sp. Attack</span>
+            <span className="stat-value">{stats.sp_attack || stats.spAttack || '?'}</span>
+          </div>
+
+          <div className="stat-item">
+            <span className="stat-label">Sp. Defense</span>
+            <span className="stat-value">{stats.sp_defense || stats.spDefense || '?'}</span>
+          </div>
+
+          {pokemon.nature !== undefined && (
+            <div className="stat-item">
+              <span className="stat-label">Nature</span>
+              <span className="stat-value">#{pokemon.nature}</span>
+            </div>
+          )}
+
+          {pokemon.ability_slot !== undefined && (
+            <div className="stat-item">
+              <span className="stat-label">Ability Slot</span>
+              <span className="stat-value">{pokemon.ability_slot + 1}</span>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
-}
-
-function getStatColor(value) {
-  if (value >= 150) return '#e74c3c';
-  if (value >= 100) return '#f39c12';
-  if (value >= 70) return '#f1c40f';
-  if (value >= 50) return '#3498db';
-  return '#95a5a6';
 }
 
 export default PokemonStats;

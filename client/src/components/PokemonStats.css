@@ -6,57 +6,29 @@
 }
 
 .pokemon-stats h4 {
-  margin-top: 0;
-  margin-bottom: 1rem;
+  margin: 0 0 1rem 0;
   color: #f39c12;
+  font-size: 1.1rem;
 }
 
-.stats-grid {
+.stat-item {
   display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
+  justify-content: space-between;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
 }
 
-.stat-row {
-  display: grid;
-  grid-template-columns: 80px 50px 1fr;
-  align-items: center;
-  gap: 0.5rem;
+.stat-item:last-child {
+  border-bottom: none;
 }
 
-.stat-name {
-  font-size: 0.875rem;
-  color: #bbb;
+.stat-label {
+  color: #999;
+  font-size: 0.9rem;
 }
 
 .stat-value {
   font-weight: bold;
-  text-align: right;
-}
-
-.stat-bar {
-  height: 8px;
-  background-color: rgba(255, 255, 255, 0.1);
-  border-radius: 4px;
-  overflow: hidden;
-}
-
-.stat-fill {
-  height: 100%;
-  transition: width 0.3s ease;
-}
-
-.stat-total {
-  margin-top: 1rem;
-  padding-top: 1rem;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-weight: bold;
-}
-
-.total-value {
-  color: #f39c12;
-  font-size: 1.1rem;
+  color: #3498db;
+  font-size: 1rem;
 }
