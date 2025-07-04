@@ -1,0 +1,78 @@
+.type-effectiveness {
+  background-color: rgba(0, 0, 0, 0.2);
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.type-effectiveness h3 {
+  margin-top: 0;
+  margin-bottom: 1rem;
+  color: #f39c12;
+  text-align: center;
+}
+
+.effectiveness-section {
+  margin-bottom: 1.5rem;
+}
+
+.effectiveness-section:last-child {
+  margin-bottom: 0;
+}
+
+.effectiveness-section h4 {
+  margin-bottom: 0.5rem;
+  font-size: 0.875rem;
+  color: #bbb;
+}
+
+.effectiveness-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.multiplier {
+  font-weight: bold;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.875rem;
+}
+
+.mult-0 {
+  background-color: #7f8c8d;
+  color: #fff;
+}
+
+.mult-0\.5 {
+  background-color: #e74c3c;
+  color: #fff;
+}
+
+.mult-1 {
+  background-color: #3498db;
+  color: #fff;
+}
+
+.mult-2 {
+  background-color: #2ecc71;
+  color: #fff;
+}
+
+.mult-4 {
+  background-color: #f39c12;
+  color: #fff;
+}
+
+.type-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.no-types {
+  color: #666;
+  font-style: italic;
+  font-size: 0.875rem;
+  margin: 0.5rem 0;
+}

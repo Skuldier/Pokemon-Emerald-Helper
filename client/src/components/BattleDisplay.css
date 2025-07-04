@@ -1,0 +1,76 @@
+.battle-display {
+  text-align: center;
+}
+
+.pokemon-sprite {
+  margin-bottom: 1rem;
+}
+
+.sprite-placeholder {
+  width: 120px;
+  height: 120px;
+  background-color: rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto;
+  font-size: 1.5rem;
+  font-weight: bold;
+  color: #666;
+}
+
+.pokemon-info {
+  margin-bottom: 1rem;
+}
+
+.level {
+  font-size: 1.2rem;
+  font-weight: bold;
+  margin-bottom: 0.5rem;
+}
+
+.hp-bar {
+  margin: 1rem 0;
+}
+
+.hp-text {
+  font-size: 0.875rem;
+  margin-bottom: 0.25rem;
+}
+
+.hp-bar-container {
+  height: 20px;
+  background-color: rgba(0, 0, 0, 0.3);
+  border-radius: 10px;
+  overflow: hidden;
+  position: relative;
+}
+
+.hp-bar-fill {
+  height: 100%;
+  transition: width 0.3s ease, background-color 0.3s ease;
+}
+
+.moves {
+  margin-top: 1.5rem;
+  text-align: left;
+}
+
+.moves h4 {
+  margin-bottom: 0.5rem;
+  color: #f39c12;
+}
+
+.move-list {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+}
+
+.move {
+  background-color: rgba(255, 255, 255, 0.1);
+  padding: 0.5rem;
+  border-radius: 4px;
+  font-size: 0.875rem;
+}
