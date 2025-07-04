@@ -1,10 +1,10 @@
 @echo off
-REM Pokemon Companion Tool - SNI Version Startup Script
+REM Pokemon Companion Tool - Direct Connection Startup Script
 
-title Pokemon Companion SNI Launcher
+title Pokemon Companion Launcher
 
 echo ======================================================
-echo     Pokemon Emerald Companion Tool - SNI Version
+echo     Pokemon Emerald Companion Tool - Direct Mode
 echo ======================================================
 echo.
 
@@ -15,13 +15,14 @@ if not exist "server\package.json" (
     exit /b 1
 )
 
-echo [✓] Using SNI connector on port 65398
+echo [✓] Direct connection mode (no SNI required)
 echo.
 
 REM Check if Node.js is installed
 node --version >nul 2>&1
 if errorlevel 1 (
     echo ERROR: Node.js is not installed!
+    echo Please install Node.js from https://nodejs.org/
     pause
     exit /b 1
 )
@@ -47,9 +48,9 @@ echo Starting Services...
 echo ======================================================
 echo.
 
-REM Start the server (connects to SNI)
-echo Starting companion server (SNI mode)...
-start "Pokemon Companion - SNI Server" cmd /k "cd /d %cd%\server && npm start"
+REM Start the server
+echo Starting companion server...
+start "Pokemon Companion - Server" cmd /k "cd /d %cd%\server && node server.js"
 
 timeout /t 3 /nobreak >nul
 
@@ -62,13 +63,13 @@ echo ======================================================
 echo [✓] All services started!
 echo ======================================================
 echo.
-echo IMPORTANT: Make sure SNI is running on port 65398
-echo.
 echo Setup checklist:
-echo   1. SNI is running
-echo   2. BizHawk has Connector.lua loaded
-echo   3. Pokemon Emerald ROM is loaded
-echo   4. React app opened in your browser
+echo   1. BizHawk is running with Pokemon Emerald loaded
+echo   2. Load pokemon_companion.lua in BizHawk Lua Console
+echo   3. React app will open in your browser automatically
+echo.
+echo The Lua script connects directly to the server on port 17242.
+echo No SNI or additional connectors needed!
 echo.
 echo The companion tool will show battle data when you enter a battle!
 echo.

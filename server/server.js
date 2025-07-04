@@ -1,5 +1,5 @@
-// server/server-sni.js
-// Pokemon Companion Tool - SNI Server with Proper Handshake
+// server/server.js
+// Pokemon Companion Tool - Direct Server (No SNI)
 
 const express = require('express');
 const http = require('http');
@@ -21,369 +21,156 @@ const io = socketIo(server, {
 });
 
 // Configuration
-const SNI_HOST = process.env.SNI_HOST || '127.0.0.1';
-const SNI_PORT = process.env.SNI_PORT || 65398;
-const HTTP_PORT = 3001;
+const TCP_PORT = 17242;  // For BizHawk Lua script connections
+const HTTP_PORT = 3001;  // For web UI
 
 // State
-let sniClient = null;
+let bizhawkClient = null;
 let battleState = null;
 let connectionStatus = 'disconnected';
-let messageBuffer = '';
 
-// Pokemon Emerald Memory Addresses
-const MEMORY = {
-  IN_BATTLE: 0x02022FEC,
-  BATTLE_TYPE: 0x02022FEE,
-  PARTY_PLAYER: 0x02024284,
-  PARTY_ENEMY: 0x02024744
-};
-
-// Pokemon data offsets
-const POKEMON_SIZE = 100;
-const POKEMON_OFFSETS = {
-  species: 0x20,
-  held_item: 0x22,
-  moves: 0x2C,
-  level: 0x54,
-  hp_current: 0x56,
-  hp_max: 0x58,
-  attack: 0x5A,
-  defense: 0x5C,
-  speed: 0x5E,
-  sp_attack: 0x60,
-  sp_defense: 0x62,
-  nature: 0x64
-};
-
-// Read queue
-const readQueue = [];
-let currentReadCallback = null;
-let isProcessingRead = false;
-
-// Connection management
-let isConnecting = false;
-let reconnectTimer = null;
-
-function connectToSNI() {
-  if (isConnecting || (sniClient && connectionStatus === 'connected')) {
-    return;
-  }
+// Create TCP server for BizHawk connection
+const tcpServer = net.createServer((socket) => {
+  console.log('BizHawk connected from:', socket.remoteAddress);
+  bizhawkClient = socket;
+  connectionStatus = 'connected';
   
-  isConnecting = true;
+  // Notify web clients
+  io.emit('connection-status', { status: 'connected' });
   
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
+  let buffer = '';
   
-  console.log(`Connecting to SNI at ${SNI_HOST}:${SNI_PORT}...`);
-  
-  if (sniClient) {
-    sniClient.destroy();
-    sniClient = null;
-  }
-  
-  sniClient = new net.Socket();
-  
-  sniClient.connect(SNI_PORT, SNI_HOST, () => {
-    console.log('Connected to SNI!');
-    isConnecting = false;
-    connectionStatus = 'connected';
-    messageBuffer = '';
+  socket.on('data', (data) => {
+    buffer += data.toString();
     
-    // Send SetName immediately
-    console.log('Sending: SetName|PokemonCompanion');
-    sniClient.write('SetName|PokemonCompanion\n');
+    // Process line-based protocol from your Lua script
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
     
-    io.emit('connection-status', { status: 'connected' });
-    
-    // Start monitoring after handshake completes
-    setTimeout(() => {
-      if (connectionStatus === 'connected') {
-        startBattleMonitoring();
-      }
-    }, 1000);
-  });
-  
-  sniClient.on('data', (data) => {
-    messageBuffer += data.toString();
-    processMessages();
-  });
-  
-  sniClient.on('close', () => {
-    console.log('SNI connection closed');
-    cleanup();
-  });
-  
-  sniClient.on('error', (err) => {
-    console.error('SNI error:', err.message);
-    isConnecting = false;
-    cleanup();
-  });
-}
-
-function cleanup() {
-  connectionStatus = 'disconnected';
-  isConnecting = false;
-  battleState = null;
-  readQueue.length = 0;
-  isProcessingRead = false;
-  currentReadCallback = null;
-  
-  if (sniClient) {
-    sniClient.destroy();
-    sniClient = null;
-  }
-  
-  if (monitoringInterval) {
-    clearInterval(monitoringInterval);
-    monitoringInterval = null;
-  }
-  
-  io.emit('connection-status', { status: 'disconnected' });
-  io.emit('battle-update', null);
-  
-  if (!reconnectTimer) {
-    reconnectTimer = setTimeout(() => {
-      reconnectTimer = null;
-      connectToSNI();
-    }, 5000);
-  }
-}
-
-function processMessages() {
-  const lines = messageBuffer.split('\n');
-  messageBuffer = lines.pop() || '';
-  
-  for (const line of lines) {
-    if (line.trim()) {
-      processMessage(line.trim());
-    }
-  }
-}
-
-function processMessage(message) {
-  // Handle hex data response
-  if (message.match(/^[0-9a-fA-F]+$/)) {
-    handleReadResponse(message);
-    return;
-  }
-  
-  // Handle Version request from SNI
-  if (message === 'Version') {
-    console.log('SNI version request received - responding...');
-    // Respond with our version info
-    const versionResponse = 'Version|PokemonCompanion|1.0|NodeJS\n';
-    sniClient.write(versionResponse);
-    console.log('Sent:', versionResponse.trim());
-    return;
-  }
-  
-  // Handle Version responses from other clients
-  if (message.startsWith('Version|')) {
-    console.log('Version info from other client:', message);
-    return;
-  }
-  
-  // Log other messages
-  console.log('SNI message:', message);
-}
-
-function sendCommand(command) {
-  if (!sniClient || connectionStatus !== 'connected') {
-    return false;
-  }
-  
-  try {
-    sniClient.write(command + '\n');
-    return true;
-  } catch (err) {
-    console.error('Send error:', err);
-    return false;
-  }
-}
-
-function readMemory(address, length, callback) {
-  if (connectionStatus !== 'connected') {
-    callback(null);
-    return;
-  }
-  
-  readQueue.push({
-    address: address,
-    length: length,
-    callback: callback
-  });
-  
-  processReadQueue();
-}
-
-function processReadQueue() {
-  if (isProcessingRead || readQueue.length === 0) {
-    return;
-  }
-  
-  const request = readQueue.shift();
-  isProcessingRead = true;
-  currentReadCallback = request.callback;
-  
-  // Send read command
-  const command = `Read|${request.address}|${request.length}|System Bus`;
-  
-  if (!sendCommand(command)) {
-    if (currentReadCallback) {
-      currentReadCallback(null);
-      currentReadCallback = null;
-    }
-    isProcessingRead = false;
-    setTimeout(processReadQueue, 100);
-  }
-}
-
-function handleReadResponse(hexData) {
-  if (!currentReadCallback) {
-    isProcessingRead = false;
-    return;
-  }
-  
-  const bytes = [];
-  
-  // Convert hex to bytes
-  for (let i = 0; i < hexData.length; i += 2) {
-    bytes.push(parseInt(hexData.substr(i, 2), 16));
-  }
-  
-  const callback = currentReadCallback;
-  currentReadCallback = null;
-  isProcessingRead = false;
-  
-  callback(bytes);
-  
-  // Process next read
-  setTimeout(processReadQueue, 50);
-}
-
-function parsePokemonData(bytes, slot = 0) {
-  if (!bytes || bytes.length < POKEMON_SIZE) return null;
-  
-  const offset = slot * POKEMON_SIZE;
-  
-  if (offset + POKEMON_SIZE > bytes.length) return null;
-  
-  const species = bytes[offset + POKEMON_OFFSETS.species] | 
-                  (bytes[offset + POKEMON_OFFSETS.species + 1] << 8);
-  
-  if (species === 0 || species > 500) return null;
-  
-  const pokemon = {
-    species,
-    level: bytes[offset + POKEMON_OFFSETS.level],
-    hp: {
-      current: bytes[offset + POKEMON_OFFSETS.hp_current] | 
-               (bytes[offset + POKEMON_OFFSETS.hp_current + 1] << 8),
-      max: bytes[offset + POKEMON_OFFSETS.hp_max] | 
-           (bytes[offset + POKEMON_OFFSETS.hp_max + 1] << 8)
-    },
-    stats: {
-      attack: bytes[offset + POKEMON_OFFSETS.attack] | 
-              (bytes[offset + POKEMON_OFFSETS.attack + 1] << 8),
-      defense: bytes[offset + POKEMON_OFFSETS.defense] | 
-               (bytes[offset + POKEMON_OFFSETS.defense + 1] << 8),
-      speed: bytes[offset + POKEMON_OFFSETS.speed] | 
-             (bytes[offset + POKEMON_OFFSETS.speed + 1] << 8),
-      sp_attack: bytes[offset + POKEMON_OFFSETS.sp_attack] | 
-                 (bytes[offset + POKEMON_OFFSETS.sp_attack + 1] << 8),
-      sp_defense: bytes[offset + POKEMON_OFFSETS.sp_defense] | 
-                  (bytes[offset + POKEMON_OFFSETS.sp_defense + 1] << 8)
-    },
-    nature: bytes[offset + POKEMON_OFFSETS.nature],
-    held_item: bytes[offset + POKEMON_OFFSETS.held_item] | 
-               (bytes[offset + POKEMON_OFFSETS.held_item + 1] << 8),
-    moves: []
-  };
-  
-  if (pokemon.level === 0 || pokemon.level > 100) return null;
-  if (pokemon.hp.max === 0) return null;
-  
-  for (let i = 0; i < 4; i++) {
-    const move = bytes[offset + POKEMON_OFFSETS.moves + i * 2] | 
-                 (bytes[offset + POKEMON_OFFSETS.moves + i * 2 + 1] << 8);
-    if (move > 0 && move < 1000) {
-      pokemon.moves.push(move);
-    }
-  }
-  
-  return pokemon;
-}
-
-let monitoringInterval = null;
-
-function startBattleMonitoring() {
-  if (monitoringInterval) {
-    clearInterval(monitoringInterval);
-  }
-  
-  console.log('Starting battle monitoring...');
-  
-  monitoringInterval = setInterval(() => {
-    if (connectionStatus === 'connected' && !isProcessingRead) {
-      checkBattleState();
-    }
-  }, 1000);
-}
-
-function checkBattleState() {
-  readMemory(MEMORY.IN_BATTLE, 1, (bytes) => {
-    if (!bytes || bytes.length === 0) return;
-    
-    const inBattle = bytes[0];
-    
-    if (inBattle !== 0) {
-      readBattleData();
-    } else {
-      if (battleState) {
-        console.log('Battle ended');
-        battleState = null;
-        io.emit('battle-update', null);
+    for (const line of lines) {
+      if (line.trim()) {
+        handleBizHawkMessage(line.trim());
       }
     }
   });
-}
+  
+  socket.on('end', () => {
+    console.log('BizHawk disconnected');
+    bizhawkClient = null;
+    connectionStatus = 'disconnected';
+    battleState = null;
+    io.emit('connection-status', { status: 'disconnected' });
+    io.emit('battle-update', null);
+  });
+  
+  socket.on('error', (err) => {
+    console.error('BizHawk socket error:', err);
+  });
+});
 
-function readBattleData() {
-  readMemory(MEMORY.PARTY_ENEMY, 600, (enemyBytes) => {
-    if (!enemyBytes) return;
-    
-    readMemory(MEMORY.PARTY_PLAYER, 600, (playerBytes) => {
-      if (!playerBytes) return;
+// Handle messages from BizHawk Lua script
+function handleBizHawkMessage(message) {
+  console.log('BizHawk message:', message);
+  
+  const parts = message.split('|');
+  const command = parts[0];
+  
+  switch (command) {
+    case 'Hello':
+      // Handshake from Lua script
+      const [_, name, platform, rom] = parts;
+      console.log(`Hello from ${name} on ${platform}, playing ${rom}`);
+      sendToBizHawk('Version|PokemonCompanion|1.0|Server');
+      break;
       
-      const enemyPokemon = parsePokemonData(enemyBytes, 0);
-      const playerPokemon = parsePokemonData(playerBytes, 0);
+    case 'Version':
+      // Version info from Lua script
+      console.log('BizHawk version:', parts.slice(1).join('|'));
+      break;
       
-      if (enemyPokemon && playerPokemon) {
-        processBattleData({
-          enemy: { active: enemyPokemon },
-          player: { active: playerPokemon }
-        });
+    case 'PokemonData':
+      // Battle data update: PokemonData|count|species|inBattle|frame
+      const [_cmd, count, species, inBattle, frame] = parts;
+      console.log(`Pokemon data: ${count} pokemon, species ${species}, battle: ${inBattle}`);
+      
+      // You can expand this to send full battle data
+      if (inBattle === '1') {
+        sendToBizHawk('RequestData');
       }
-    });
-  });
+      break;
+      
+    case 'BattleUpdate':
+      // Detailed battle data (you'll need to expand the Lua script for this)
+      try {
+        const battleData = JSON.parse(parts[1]);
+        processBattleData(battleData);
+      } catch (e) {
+        console.error('Failed to parse battle data:', e);
+      }
+      break;
+      
+    case 'Read':
+      // Handle read requests from Lua if needed
+      const [_r, address, length] = parts;
+      console.log(`Read request: ${address} for ${length} bytes`);
+      // For now, just acknowledge
+      sendToBizHawk('ReadResponse|OK');
+      break;
+      
+    case 'BattleEnd':
+      // Battle ended
+      console.log('\n=== BATTLE ENDED ===\n');
+      battleState = null;
+      io.emit('battle-update', null);
+      break;
+      
+    case 'Goodbye':
+      console.log('BizHawk said goodbye');
+      break;
+      
+    default:
+      console.log('Unknown command:', command);
+  }
 }
 
+// Send message to BizHawk
+function sendToBizHawk(message) {
+  if (bizhawkClient && bizhawkClient.writable) {
+    bizhawkClient.write(message + '\n');
+    console.log('Sent to BizHawk:', message);
+  }
+}
+
+// Process battle data
 function processBattleData(rawData) {
-  const enemyPokemon = rawData.enemy.active;
-  const playerPokemon = rawData.player.active;
+  if (!rawData || !rawData.enemy || !rawData.player) {
+    console.log('Invalid battle data received');
+    return;
+  }
   
+  const enemyPokemon = rawData.enemy;
+  const playerPokemon = rawData.player;
+  
+  // Get Pokemon info from data files
   const enemyInfo = pokemonData.getPokemonInfo(enemyPokemon.species);
   const playerInfo = pokemonData.getPokemonInfo(playerPokemon.species);
   
-  const tierRating = pokemonData.calculateTierRating(enemyPokemon, enemyInfo);
+  console.log(`\n=== BATTLE UPDATE ===`);
+  console.log(`Player: ${playerInfo.name} (Lv.${playerPokemon.level}) HP: ${playerPokemon.hp_current}/${playerPokemon.hp_max}`);
+  console.log(`Enemy: ${enemyInfo.name} (Lv.${enemyPokemon.level}) HP: ${enemyPokemon.hp_current}/${enemyPokemon.hp_max}`);
   
+  // Calculate tier rating
+  const tierRating = pokemonData.calculateTierRating(enemyPokemon, enemyInfo);
+  console.log(`Enemy Tier: ${tierRating.overall} (Total Stats: ${tierRating.totalStats})`);
+  
+  // Calculate type effectiveness
   const effectiveness = pokemonData.calculateTypeEffectiveness(
     playerInfo.types,
     enemyInfo.types
   );
+  
+  console.log(`Type Matchup: Player ${effectiveness.attacking}x damage, Enemy ${effectiveness.defending}x damage`);
+  console.log(`====================\n`);
   
   battleState = {
     enemy: {
@@ -399,14 +186,14 @@ function processBattleData(rawData) {
     timestamp: Date.now()
   };
   
-  console.log(`Battle: ${playerInfo.name} vs ${enemyInfo.name}`);
+  // Send to web UI
   io.emit('battle-update', battleState);
 }
 
-// REST API
+// REST API endpoints
 app.get('/api/status', (req, res) => {
   res.json({
-    connection: connectionStatus,
+    bizhawkConnected: bizhawkClient !== null,
     hasBattleData: battleState !== null
   });
 });
@@ -415,10 +202,11 @@ app.get('/api/battle', (req, res) => {
   res.json(battleState);
 });
 
-// Socket.IO
+// Socket.IO for web UI
 io.on('connection', (socket) => {
   console.log('Web client connected');
   
+  // Send current state
   socket.emit('connection-status', { status: connectionStatus });
   if (battleState) {
     socket.emit('battle-update', battleState);
@@ -429,30 +217,31 @@ io.on('connection', (socket) => {
   });
 });
 
-// Start server
-server.listen(HTTP_PORT, () => {
-  console.log(`HTTP server listening on port ${HTTP_PORT}`);
-  console.log('Connecting to SNI...');
-  
-  setTimeout(connectToSNI, 1000);
+// Start TCP server for BizHawk
+tcpServer.listen(TCP_PORT, () => {
+  console.log(`TCP server listening on port ${TCP_PORT} for BizHawk connections`);
 });
 
-// Cleanup
+// Start HTTP server for web UI
+server.listen(HTTP_PORT, () => {
+  console.log(`HTTP server listening on port ${HTTP_PORT} for web UI`);
+  console.log('');
+  console.log('Ready for connections!');
+  console.log('1. Make sure BizHawk is running with Pokemon Emerald');
+  console.log('2. Load pokemon_companion.lua in BizHawk');
+  console.log('3. Open http://localhost:3000 in your browser');
+});
+
+// Cleanup on exit
 process.on('SIGINT', () => {
   console.log('\nShutting down...');
   
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
+  if (bizhawkClient) {
+    sendToBizHawk('Goodbye|Server');
+    bizhawkClient.destroy();
   }
   
-  if (monitoringInterval) {
-    clearInterval(monitoringInterval);
-  }
-  
-  if (sniClient) {
-    sniClient.destroy();
-  }
-  
+  tcpServer.close();
   server.close();
   process.exit(0);
 });
