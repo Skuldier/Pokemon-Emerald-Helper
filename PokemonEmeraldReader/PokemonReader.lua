@@ -1,6 +1,5 @@
--- PokemonReader.lua (COMPLETE FIXED VERSION)
--- Pokemon data reading module combining ROM and RAM data
--- Handles decryption and complete Pokemon structure with proper ROMData interface
+-- PokemonReader.lua
+-- Fixed version with proper move decryption for Archipelago ROMs
 
 local Memory = require("Memory")
 local Pointers = require("Pointers")
@@ -8,64 +7,46 @@ local ROMData = require("ROMData")
 
 local PokemonReader = {}
 
--- Bitwise operation compatibility
-local band = _VERSION >= "Lua 5.3" and function(a,b) return a & b end or bit.band
-local bor = _VERSION >= "Lua 5.3" and function(a,b) return a | b end or bit.bor
-local bxor = _VERSION >= "Lua 5.3" and function(a,b) return a ~ b end or bit.bxor
-local bnot = _VERSION >= "Lua 5.3" and function(a) return ~a end or bit.bnot
-local lshift = _VERSION >= "Lua 5.3" and function(a,b) return a << b end or bit.lshift
-local rshift = _VERSION >= "Lua 5.3" and function(a,b) return a >> b end or bit.rshift
+-- Bitwise operations
+local band = bit.band or function(a,b) return a & b end
+local bor = bit.bor or function(a,b) return a | b end
+local bxor = bit.bxor or function(a,b) return a ~ b end
+local bnot = bit.bnot or function(a) return ~a end
+local lshift = bit.lshift or function(a,b) return a << b end
+local rshift = bit.rshift or function(a,b) return a >> b end
 
--- Pokemon data structure constants
-PokemonReader.POKEMON_SIZE = 100        -- Size in party
-PokemonReader.POKEMON_PC_SIZE = 80      -- Size in PC
+-- Constants
+PokemonReader.POKEMON_SIZE = 100
+PokemonReader.POKEMON_PC_SIZE = 80
 PokemonReader.PARTY_SIZE = 6
-PokemonReader.SUBSTRUCTURE_SIZE = 12    -- Each encrypted substructure
-PokemonReader.ENCRYPTED_SIZE = 48       -- Total encrypted data
 
--- Substructure order based on personality value
-PokemonReader.substructureOrders = {
+-- Substructure order tables (24 possible orders)
+PokemonReader.SUBSTRUCTURE_ORDERS = {
     {0, 1, 2, 3}, {0, 1, 3, 2}, {0, 2, 1, 3}, {0, 2, 3, 1}, {0, 3, 1, 2}, {0, 3, 2, 1},
     {1, 0, 2, 3}, {1, 0, 3, 2}, {1, 2, 0, 3}, {1, 2, 3, 0}, {1, 3, 0, 2}, {1, 3, 2, 0},
     {2, 0, 1, 3}, {2, 0, 3, 1}, {2, 1, 0, 3}, {2, 1, 3, 0}, {2, 3, 0, 1}, {2, 3, 1, 0},
     {3, 0, 1, 2}, {3, 0, 2, 1}, {3, 1, 0, 2}, {3, 1, 2, 0}, {3, 2, 0, 1}, {3, 2, 1, 0}
 }
 
--- Status condition flags
-PokemonReader.statusFlags = {
-    SLEEP = 0x07,      -- 0-7 sleep counter
-    POISON = 0x08,
-    BURN = 0x10,
-    FREEZE = 0x20,
-    PARALYSIS = 0x40,
-    BAD_POISON = 0x80
-}
+-- Substructure types
+local GROWTH = 0
+local ATTACKS = 1
+local EVS = 2
+local MISC = 3
 
--- Calculate checksum for Pokemon data
-function PokemonReader.calculateChecksum(data)
-    local sum = 0
-    -- Sum all 16-bit values in the encrypted data
-    for i = 0, 23 do  -- 48 bytes = 24 16-bit values
-        sum = sum + Memory.read_u16_le(data + 32 + (i * 2))
-    end
-    return band(sum, 0xFFFF)
-end
-
--- Decrypt Pokemon data substructure
-function PokemonReader.decryptSubstructure(address, key, index)
+-- Decrypt a 12-byte substructure
+function PokemonReader.decryptSubstructure(data, key)
     local decrypted = {}
-    
-    for i = 0, 5 do  -- 12 bytes = 6 16-bit values
-        local offset = index * 12 + (i * 2)
-        local encrypted = Memory.read_u16_le(address + 32 + offset)
-        if not encrypted then return nil end
-        
-        -- XOR with key
-        local decryptedValue = bxor(encrypted, key)
-        decrypted[i * 2 + 1] = band(decryptedValue, 0xFF)
-        decrypted[i * 2 + 2] = rshift(decryptedValue, 8)
+    for i = 1, 12, 4 do
+        local word = 0
+        for j = 0, 3 do
+            word = bor(word, lshift(data[i + j] or 0, j * 8))
+        end
+        local decryptedWord = bxor(word, key)
+        for j = 0, 3 do
+            decrypted[i + j] = band(rshift(decryptedWord, j * 8), 0xFF)
+        end
     end
-    
     return decrypted
 end
 
@@ -82,7 +63,7 @@ function PokemonReader.readPokemon(address, isInPC)
     
     local pokemon = {}
     
-    -- Read unencrypted data (first 32 bytes)
+    -- Read unencrypted header (32 bytes)
     pokemon.personality = Memory.read_u32_le(address + 0)
     pokemon.otId = Memory.read_u32_le(address + 4)
     pokemon.nickname = PokemonReader.readPokemonString(address + 8, 10)
@@ -99,99 +80,121 @@ function PokemonReader.readPokemon(address, isInPC)
     -- Calculate encryption key
     local key = bxor(pokemon.personality, pokemon.otId)
     
+    -- Read encrypted data (48 bytes)
+    local encryptedData = Memory.readbytes(address + 32, 48)
+    if not encryptedData then
+        return nil
+    end
+    
     -- Determine substructure order
     local orderIndex = pokemon.personality % 24
-    local order = PokemonReader.substructureOrders[orderIndex + 1]
+    local order = PokemonReader.SUBSTRUCTURE_ORDERS[orderIndex + 1]
     
-    -- Decrypt substructures
+    -- Decrypt each 12-byte substructure
     local substructures = {}
     for i = 0, 3 do
-        substructures[i] = PokemonReader.decryptSubstructure(address, key, order[i + 1])
-        if not substructures[i] then
-            return nil  -- Decryption failed
+        local offset = i * 12 + 1
+        local subData = {}
+        for j = 0, 11 do
+            subData[j + 1] = encryptedData[offset + j]
         end
+        local decrypted = PokemonReader.decryptSubstructure(subData, key)
+        local subType = order[i + 1]
+        substructures[subType] = decrypted
     end
     
-    -- Parse Growth substructure (G)
-    local growth = substructures[0]
-    pokemon.species = growth[1] + (growth[2] * 256)
-    pokemon.heldItem = growth[3] + (growth[4] * 256)
-    pokemon.experience = growth[5] + (growth[6] * 256) + (growth[7] * 65536) + (growth[8] * 16777216)
-    pokemon.ppBonuses = growth[9]
-    pokemon.friendship = growth[10]
+    -- Extract data from decrypted substructures
+    -- Growth substructure
+    if substructures[GROWTH] then
+        local growth = substructures[GROWTH]
+        pokemon.species = bor(growth[1] or 0, lshift(growth[2] or 0, 8))
+        pokemon.heldItem = bor(growth[3] or 0, lshift(growth[4] or 0, 8))
+        pokemon.experience = bor(growth[5] or 0, lshift(growth[6] or 0, 8), 
+                                lshift(growth[7] or 0, 16), lshift(growth[8] or 0, 24))
+        pokemon.ppBonuses = growth[9] or 0
+        pokemon.friendship = growth[10] or 0
+    end
     
-    -- Parse Attacks substructure (A)
-    local attacks = substructures[1]
-    pokemon.moves = {
-        attacks[1] + (attacks[2] * 256),
-        attacks[3] + (attacks[4] * 256),
-        attacks[5] + (attacks[6] * 256),
-        attacks[7] + (attacks[8] * 256)
-    }
-    pokemon.pp = {attacks[9], attacks[10], attacks[11], attacks[12]}
-    
-    -- Parse EVs & Condition substructure (E)
-    local evs = substructures[2]
-    pokemon.evs = {
-        hp = evs[1],
-        attack = evs[2],
-        defense = evs[3],
-        speed = evs[4],
-        spAttack = evs[5],
-        spDefense = evs[6]
-    }
-    pokemon.contest = {
-        cool = evs[7],
-        beauty = evs[8],
-        cute = evs[9],
-        smart = evs[10],
-        tough = evs[11],
-        feel = evs[12]
-    }
-    
-    -- Parse Miscellaneous substructure (M)
-    local misc = substructures[3]
-    pokemon.pokerus = misc[1]
-    pokemon.metLocation = misc[2]
-    pokemon.origins = misc[3] + (misc[4] * 256)
-    pokemon.ivs = misc[5] + (misc[6] * 256) + (misc[7] * 65536) + (misc[8] * 16777216)
-    pokemon.ribbons = misc[9] + (misc[10] * 256) + (misc[11] * 65536) + (misc[12] * 16777216)
-    
-    -- Parse IVs (stored as 32-bit value)
-    pokemon.parsedIVs = {
-        hp = band(pokemon.ivs, 0x1F),
-        attack = band(rshift(pokemon.ivs, 5), 0x1F),
-        defense = band(rshift(pokemon.ivs, 10), 0x1F),
-        speed = band(rshift(pokemon.ivs, 15), 0x1F),
-        spAttack = band(rshift(pokemon.ivs, 20), 0x1F),
-        spDefense = band(rshift(pokemon.ivs, 25), 0x1F),
-        isEgg = band(rshift(pokemon.ivs, 30), 0x1) == 1,
-        isNicknamed = band(rshift(pokemon.ivs, 31), 0x1) == 1
-    }
-    
-    -- Parse origins info
-    pokemon.metLevel = band(pokemon.origins, 0x7F)
-    pokemon.gameOfOrigin = band(rshift(pokemon.origins, 7), 0xF)
-    pokemon.ball = band(rshift(pokemon.origins, 11), 0xF)
-    pokemon.otGender = band(rshift(pokemon.origins, 15), 0x1)
-    
-    -- Calculate nature from personality
-    pokemon.nature = pokemon.personality % 25
-    
-    -- Get ability (personality bit determines which ability if Pokemon has two)
-    local romData = ROMData.getPokemon(pokemon.species)
-    if romData then
-        if band(pokemon.personality, 1) == 0 then
-            pokemon.ability = romData.ability1
-        else
-            pokemon.ability = romData.ability2 or romData.ability1
+    -- Attacks substructure - THIS IS WHERE MOVES ARE!
+    if substructures[ATTACKS] then
+        local attacks = substructures[ATTACKS]
+        pokemon.moves = {}
+        pokemon.pp = {}
+        
+        -- Read 4 moves (2 bytes each)
+        for i = 0, 3 do
+            local offset = i * 2 + 1
+            local moveId = bor(attacks[offset] or 0, lshift(attacks[offset + 1] or 0, 8))
+            
+            -- Archipelago might have extended move IDs, but let's validate them
+            if moveId > 0 and moveId < 50000 then
+                pokemon.moves[i + 1] = moveId
+            else
+                pokemon.moves[i + 1] = 0
+            end
         end
         
-        -- Store base data for easy access
-        pokemon.baseData = romData
+        -- Read PP (1 byte each) with validation
+        for i = 0, 3 do
+            local pp = attacks[9 + i] or 0
+            -- Normal max PP is usually under 64, but with PP Ups it can go to 61*1.6 = ~97
+            -- Archipelago might have different values, so be lenient
+            if pp > 0 and pp <= 255 then
+                pokemon.pp[i + 1] = pp
+            else
+                pokemon.pp[i + 1] = 0
+            end
+        end
     end
     
-    -- Read battle stats if in party (not in PC)
+    -- EVs substructure
+    if substructures[EVS] then
+        local evs = substructures[EVS]
+        pokemon.evs = {
+            hp = evs[1] or 0,
+            attack = evs[2] or 0,
+            defense = evs[3] or 0,
+            speed = evs[4] or 0,
+            spAttack = evs[5] or 0,
+            spDefense = evs[6] or 0
+        }
+        pokemon.cool = evs[7] or 0
+        pokemon.beauty = evs[8] or 0
+        pokemon.cute = evs[9] or 0
+        pokemon.smart = evs[10] or 0
+        pokemon.tough = evs[11] or 0
+        pokemon.feel = evs[12] or 0
+    end
+    
+    -- Misc substructure
+    if substructures[MISC] then
+        local misc = substructures[MISC]
+        pokemon.pokerus = misc[1] or 0
+        pokemon.metLocation = misc[2] or 0
+        local origins = bor(misc[3] or 0, lshift(misc[4] or 0, 8))
+        pokemon.metLevel = band(origins, 0x7F)
+        pokemon.metGame = band(rshift(origins, 7), 0xF)
+        pokemon.pokeball = band(rshift(origins, 11), 0xF)
+        pokemon.otGender = band(rshift(origins, 15), 0x1)
+        
+        local ivEggAbility = bor(misc[5] or 0, lshift(misc[6] or 0, 8), 
+                                lshift(misc[7] or 0, 16), lshift(misc[8] or 0, 24))
+        
+        -- Parse IVs
+        pokemon.parsedIVs = {
+            hp = band(ivEggAbility, 0x1F),
+            attack = band(rshift(ivEggAbility, 5), 0x1F),
+            defense = band(rshift(ivEggAbility, 10), 0x1F),
+            speed = band(rshift(ivEggAbility, 15), 0x1F),
+            spAttack = band(rshift(ivEggAbility, 20), 0x1F),
+            spDefense = band(rshift(ivEggAbility, 25), 0x1F)
+        }
+        
+        pokemon.isEgg = band(rshift(ivEggAbility, 30), 0x1)
+        pokemon.abilityBit = band(rshift(ivEggAbility, 31), 0x1)
+    end
+    
+    -- Read battle stats (unencrypted, only for party Pokemon)
     if not isInPC then
         local battleStatsAddr = address + 80
         pokemon.battleStats = {
@@ -206,107 +209,17 @@ function PokemonReader.readPokemon(address, isInPC)
             spAttack = Memory.read_u16_le(battleStatsAddr + 16),
             spDefense = Memory.read_u16_le(battleStatsAddr + 18),
         }
-        
-        -- Parse status
-        if pokemon.battleStats.status > 0 then
-            pokemon.battleStats.statusCondition = PokemonReader.parseStatus(pokemon.battleStats.status)
-        end
-    else
-        -- For PC Pokemon, calculate stats
-        pokemon.battleStats = PokemonReader.calculateStats(pokemon)
     end
+    
+    -- Get ROM data for the species
+    if pokemon.species and pokemon.species > 0 and pokemon.species < 500 then
+        pokemon.baseData = ROMData.getPokemon(pokemon.species)
+    end
+    
+    -- Calculate nature from personality
+    pokemon.nature = pokemon.personality % 25
     
     return pokemon
-end
-
--- Calculate stats for PC Pokemon
-function PokemonReader.calculateStats(pokemon)
-    local romData = ROMData.getPokemon(pokemon.species)
-    if not romData then return nil end
-    
-    -- Calculate level from experience
-    local level = PokemonReader.calculateLevel(pokemon.experience, romData.growthRate)
-    
-    -- Calculate stats
-    local stats = {
-        level = level,
-        currentHP = 0,  -- Unknown for PC Pokemon
-        maxHP = PokemonReader.calculateHP(romData.stats.hp, pokemon.parsedIVs.hp, pokemon.evs.hp, level),
-        attack = PokemonReader.calculateStat(romData.stats.attack, pokemon.parsedIVs.attack, pokemon.evs.attack, level, pokemon.nature, 1),
-        defense = PokemonReader.calculateStat(romData.stats.defense, pokemon.parsedIVs.defense, pokemon.evs.defense, level, pokemon.nature, 2),
-        speed = PokemonReader.calculateStat(romData.stats.speed, pokemon.parsedIVs.speed, pokemon.evs.speed, level, pokemon.nature, 3),
-        spAttack = PokemonReader.calculateStat(romData.stats.spAttack, pokemon.parsedIVs.spAttack, pokemon.evs.spAttack, level, pokemon.nature, 4),
-        spDefense = PokemonReader.calculateStat(romData.stats.spDefense, pokemon.parsedIVs.spDefense, pokemon.evs.spDefense, level, pokemon.nature, 5)
-    }
-    
-    return stats
-end
-
--- Calculate HP stat
-function PokemonReader.calculateHP(base, iv, ev, level)
-    if base == 1 then return 1 end  -- Shedinja
-    return math.floor((2 * base + iv + math.floor(ev / 4)) * level / 100) + level + 10
-end
-
--- Calculate other stats
-function PokemonReader.calculateStat(base, iv, ev, level, nature, statIndex)
-    local stat = math.floor((2 * base + iv + math.floor(ev / 4)) * level / 100) + 5
-    
-    -- Apply nature modifier
-    local natureData = ROMData.getNature(nature)
-    if natureData then
-        if natureData.increased == statIndex then
-            stat = math.floor(stat * 1.1)
-        elseif natureData.decreased == statIndex then
-            stat = math.floor(stat * 0.9)
-        end
-    end
-    
-    return stat
-end
-
--- Calculate level from experience
-function PokemonReader.calculateLevel(exp, growthRate)
-    -- Simplified - would need full experience tables
-    -- For now, return estimate
-    if exp < 8 then return 1 end
-    if exp < 27 then return 2 end
-    if exp < 64 then return 3 end
-    if exp < 125 then return 4 end
-    if exp < 216 then return 5 end
-    
-    -- Rough approximation for higher levels
-    return math.min(100, math.floor(math.pow(exp / 100, 1/3) * 10))
-end
-
--- Parse status condition
-function PokemonReader.parseStatus(status)
-    local conditions = {}
-    
-    -- Sleep counter (0-7)
-    local sleepCounter = band(status, PokemonReader.statusFlags.SLEEP)
-    if sleepCounter > 0 then
-        conditions.sleep = sleepCounter
-    end
-    
-    -- Other conditions
-    if band(status, PokemonReader.statusFlags.POISON) > 0 then
-        conditions.poison = true
-    end
-    if band(status, PokemonReader.statusFlags.BURN) > 0 then
-        conditions.burn = true
-    end
-    if band(status, PokemonReader.statusFlags.FREEZE) > 0 then
-        conditions.freeze = true
-    end
-    if band(status, PokemonReader.statusFlags.PARALYSIS) > 0 then
-        conditions.paralysis = true
-    end
-    if band(status, PokemonReader.statusFlags.BAD_POISON) > 0 then
-        conditions.badPoison = true
-    end
-    
-    return conditions
 end
 
 -- Read entire party
@@ -334,31 +247,6 @@ function PokemonReader.readParty()
     return party
 end
 
--- Read PC box
-function PokemonReader.readPCBox(boxNumber)
-    if boxNumber < 0 or boxNumber > 13 then
-        return nil
-    end
-    
-    local box = {
-        number = boxNumber,
-        pokemon = {}
-    }
-    
-    -- Read all 30 slots
-    for i = 0, 29 do
-        local addr = Pointers.getPCBoxAddress(boxNumber, i)
-        if addr then
-            local pokemon = PokemonReader.readPokemon(addr, true)
-            if pokemon and pokemon.species > 0 then
-                box.pokemon[i + 1] = pokemon
-            end
-        end
-    end
-    
-    return box
-end
-
 -- Read Pokemon string (Gen 3 encoding)
 function PokemonReader.readPokemonString(address, maxLength)
     local str = ""
@@ -366,7 +254,7 @@ function PokemonReader.readPokemonString(address, maxLength)
         local char = Memory.read_u8(address + i)
         if not char or char == 0xFF then break end
         
-        -- Character mapping (simplified)
+        -- Character mapping
         if char == 0x00 then
             str = str .. " "
         elseif char >= 0xBB and char <= 0xD4 then
@@ -375,27 +263,39 @@ function PokemonReader.readPokemonString(address, maxLength)
             str = str .. string.char(char - 0xD5 + 97)  -- a-z
         elseif char >= 0xA1 and char <= 0xAA then
             str = str .. string.char(char - 0xA1 + 48)  -- 0-9
-        else
-            -- Special characters would go here
+        elseif char == 0xAE then
+            str = str .. "-"
+        elseif char == 0xAF then
+            str = str .. "."
+        elseif char == 0xBA then
+            str = str .. "!"
+        elseif char == 0xBF then
+            str = str .. "?"
         end
     end
     return str
 end
 
--- ENHANCED FORMAT POKEMON FUNCTION (FIXES ALL DISPLAY ISSUES)
+-- Format Pokemon info for display
 function PokemonReader.formatPokemon(pokemon)
-    if not pokemon then return "Empty" end
+    if not pokemon then return {
+        name = "Empty",
+        species = "???",
+        level = "?",
+        hp = "???/???",
+        types = "???",
+        ability = "???",
+        nature = "???",
+        item = "None"
+    } end
     
     local info = {}
     
-    -- Basic info with proper fallbacks
+    -- Basic info
     info.name = pokemon.nickname ~= "" and pokemon.nickname or 
-               ROMData.getPokemonName(pokemon.species or 0)
-    
-    -- Species name (separate from nickname) - FIXED
-    info.species = ROMData.getPokemonName(pokemon.species or 0)
-    
-    -- Level
+               (pokemon.baseData and pokemon.baseData.name or "???")
+    info.species = pokemon.baseData and pokemon.baseData.name or 
+                  (pokemon.species and string.format("Species #%d", pokemon.species) or "???")
     info.level = pokemon.battleStats and pokemon.battleStats.level or "?"
     
     -- HP
@@ -408,18 +308,18 @@ function PokemonReader.formatPokemon(pokemon)
     end
     
     -- Status
-    if pokemon.battleStats and pokemon.battleStats.statusCondition then
-        local status = pokemon.battleStats.statusCondition
-        if status.sleep then info.status = "SLP"
-        elseif status.poison then info.status = "PSN"
-        elseif status.badPoison then info.status = "TOX"
-        elseif status.burn then info.status = "BRN"
-        elseif status.freeze then info.status = "FRZ"
-        elseif status.paralysis then info.status = "PAR"
+    if pokemon.battleStats and pokemon.battleStats.status and pokemon.battleStats.status > 0 then
+        local status = pokemon.battleStats.status
+        if band(status, 0x07) > 0 then info.status = "SLP"
+        elseif band(status, 0x08) > 0 then info.status = "PSN"
+        elseif band(status, 0x10) > 0 then info.status = "BRN"
+        elseif band(status, 0x20) > 0 then info.status = "FRZ"
+        elseif band(status, 0x40) > 0 then info.status = "PAR"
+        elseif band(status, 0x80) > 0 then info.status = "TOX"
         end
     end
     
-    -- Types with proper fallback - FIXED
+    -- Types
     if pokemon.baseData then
         info.types = ROMData.getTypeName(pokemon.baseData.type1) or "???"
         if pokemon.baseData.type1 ~= pokemon.baseData.type2 then
@@ -429,168 +329,28 @@ function PokemonReader.formatPokemon(pokemon)
         info.types = "???/???"
     end
     
-    -- Ability with proper fallback - FIXED
-    if pokemon.ability and pokemon.ability > 0 then
-        info.ability = ROMData.getAbilityName(pokemon.ability)
+    -- Ability
+    if pokemon.baseData and pokemon.abilityBit then
+        local abilityId = pokemon.abilityBit == 0 and pokemon.baseData.ability1 or pokemon.baseData.ability2
+        local abilityData = ROMData.getAbility(abilityId)
+        info.ability = abilityData and abilityData.name or "???"
     else
-        info.ability = "None"
+        info.ability = "???"
     end
     
-    -- Nature with proper fallback - FIXED
-    if pokemon.nature and pokemon.nature >= 0 and pokemon.nature <= 24 then
-        info.nature = ROMData.getNatureName(pokemon.nature)
-    else
-        info.nature = "???"
-    end
+    -- Nature
+    local natureData = ROMData.getNature(pokemon.nature)
+    info.nature = natureData and natureData.name or "???"
     
-    -- Item with proper fallback - FIXED
+    -- Item
     if pokemon.heldItem and pokemon.heldItem > 0 then
-        local item = ROMData.getItem(pokemon.heldItem)
-        info.item = (item and item.name) or ROMData.getItemName(pokemon.heldItem)
+        local itemData = ROMData.getItem(pokemon.heldItem)
+        info.item = itemData and itemData.name or string.format("Item #%d", pokemon.heldItem)
     else
         info.item = "None"
     end
     
     return info
-end
-
--- Enhanced move formatting function
-function PokemonReader.formatMove(moveId, currentPP, maxPP)
-    if not moveId or moveId == 0 then
-        return "---"
-    end
-    
-    local moveName = ROMData.getMoveName(moveId)
-    local ppText = ""
-    
-    if currentPP and maxPP then
-        ppText = string.format("(%d/%d)", currentPP, maxPP)
-    end
-    
-    return moveName .. ppText
-end
-
--- Enhanced Pokemon display function with all fixes
-function PokemonReader.displayPokemonInfo(pokemon, slot)
-    if not pokemon then
-        return string.format("%d. [Empty]", slot or 0)
-    end
-    
-    local info = PokemonReader.formatPokemon(pokemon)
-    local output = {}
-    
-    -- Main line with species fix
-    table.insert(output, string.format("%d. %s (Lv.%s %s)%s",
-        slot or 0,
-        info.name,
-        info.level,
-        info.species,  -- This now shows proper species name
-        info.status and " [" .. info.status .. "]" or ""
-    ))
-    
-    -- HP line
-    table.insert(output, string.format("   HP: %s", info.hp))
-    
-    -- Type/Ability/Nature line with fixes
-    table.insert(output, string.format("   %s | %s | %s | Item: %s",
-        info.types,  -- Fixed type display
-        info.ability, -- Fixed ability display
-        info.nature,  -- Fixed nature display
-        info.item     -- Fixed item display
-    ))
-    
-    -- Stats line
-    if pokemon.battleStats then
-        table.insert(output, string.format("   Stats: ATK %d | DEF %d | SPE %d | SPA %d | SPD %d",
-            pokemon.battleStats.attack or 0,
-            pokemon.battleStats.defense or 0,
-            pokemon.battleStats.speed or 0,
-            pokemon.battleStats.spAttack or 0,
-            pokemon.battleStats.spDefense or 0
-        ))
-    end
-    
-    -- Moves line
-    if pokemon.moves then
-        local moveNames = {}
-        for i, moveId in ipairs(pokemon.moves) do
-            if moveId > 0 then
-                local moveName = ROMData.getMoveName(moveId)
-                local pp = pokemon.pp and pokemon.pp[i] or 0
-                local move = ROMData.getMove(moveId)
-                local maxPP = move and move.pp or 0
-                table.insert(moveNames, string.format("%s(%d/%d)", moveName, pp, maxPP))
-            end
-        end
-        if #moveNames > 0 then
-            table.insert(output, "   Moves: " .. table.concat(moveNames, " | "))
-        end
-    end
-    
-    return table.concat(output, "\n")
-end
-
--- Test function
-function PokemonReader.test()
-    console.log("=== Pokemon Reader Module Test ===\n")
-    
-    -- Initialize ROM data
-    ROMData.init()
-    
-    -- Read party
-    console.log("Reading party...")
-    local party = PokemonReader.readParty()
-    
-    if party and party.count > 0 then
-        console.log(string.format("✓ Party has %d Pokemon:", party.count))
-        
-        for i, pokemon in ipairs(party.pokemon) do
-            if pokemon then
-                console.log(PokemonReader.displayPokemonInfo(pokemon, i))
-                console.log("")
-            end
-        end
-    else
-        console.log("✗ No party Pokemon found (game not loaded?)")
-    end
-end
-
--- Debug function for troubleshooting
-function PokemonReader.debugPokemon(pokemon, slot)
-    if not pokemon then
-        console.log("Slot " .. (slot or "?") .. ": Empty")
-        return
-    end
-    
-    console.log("=== DEBUG INFO FOR SLOT " .. (slot or "?") .. " ===")
-    console.log("Raw data:")
-    console.log("  Species ID: " .. (pokemon.species or "nil"))
-    console.log("  Nature ID: " .. (pokemon.nature or "nil"))
-    console.log("  Ability ID: " .. (pokemon.ability or "nil"))
-    console.log("  Held Item ID: " .. (pokemon.heldItem or "nil"))
-    console.log("  Nickname: '" .. (pokemon.nickname or "nil") .. "'")
-    
-    if pokemon.baseData then
-        console.log("  Base Data Found:")
-        console.log("    Type1: " .. (pokemon.baseData.type1 or "nil"))
-        console.log("    Type2: " .. (pokemon.baseData.type2 or "nil"))
-        console.log("    Ability1: " .. (pokemon.baseData.ability1 or "nil"))
-        console.log("    Ability2: " .. (pokemon.baseData.ability2 or "nil"))
-    else
-        console.log("  Base Data: MISSING")
-    end
-    
-    console.log("Resolved names:")
-    console.log("  Species: " .. ROMData.getPokemonName(pokemon.species or 0))
-    console.log("  Nature: " .. ROMData.getNatureName(pokemon.nature or 0))
-    console.log("  Ability: " .. ROMData.getAbilityName(pokemon.ability or 0))
-    
-    if pokemon.baseData then
-        console.log("  Type1: " .. ROMData.getTypeName(pokemon.baseData.type1))
-        console.log("  Type2: " .. ROMData.getTypeName(pokemon.baseData.type2))
-    end
-    
-    console.log("==============================")
 end
 
 return PokemonReader
