@@ -1,111 +1,199 @@
+/* client/src/App.css */
+/* Updated styles for ROM upload integration */
+
 .App {
   min-height: 100vh;
-  background-color: #1a1a2e;
-  color: #eee;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+  color: #fff;
+  display: flex;
+  flex-direction: column;
 }
 
 .App-header {
-  background-color: #16213e;
-  padding: 1rem 2rem;
+  background-color: rgba(0, 0, 0, 0.5);
+  padding: 1.5rem;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+  border-bottom: 2px solid rgba(243, 156, 18, 0.3);
 }
 
 .App-header h1 {
   margin: 0;
-  font-size: 1.5rem;
+  font-size: 2rem;
   color: #f39c12;
+  text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
 }
 
 .App-main {
+  flex: 1;
   padding: 2rem;
-  max-width: 1400px;
+  max-width: 1200px;
   margin: 0 auto;
+  width: 100%;
 }
 
-.battle-container {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  gap: 2rem;
-  animation: fadeIn 0.3s ease-in;
+.initial-setup {
+  text-align: center;
+  margin-bottom: 2rem;
+  padding: 2rem;
+  background-color: rgba(0, 0, 0, 0.3);
+  border-radius: 12px;
 }
 
-@keyframes fadeIn {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
+.initial-setup h2 {
+  color: #3498db;
+  margin-bottom: 1rem;
 }
 
-.enemy-section,
-.info-section,
-.player-section {
-  background-color: #0f3460;
+.initial-setup p {
+  color: #bbb;
+  font-size: 1.1rem;
+}
+
+.analysis-summary {
+  background-color: rgba(46, 204, 113, 0.1);
+  border: 1px solid #2ecc71;
   border-radius: 12px;
   padding: 1.5rem;
-  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+  margin-bottom: 2rem;
+  animation: slideIn 0.5s ease;
 }
 
-.enemy-section h2 {
-  margin-top: 0;
-  color: #e94560;
-  font-size: 1.8rem;
-  text-align: center;
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
-.player-section h3 {
+.analysis-summary h3 {
+  color: #2ecc71;
   margin-top: 0;
-  color: #4fbdba;
-  text-align: center;
+  margin-bottom: 1rem;
+}
+
+.summary-content {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+}
+
+.summary-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem;
+  background-color: rgba(0, 0, 0, 0.2);
+  border-radius: 6px;
+}
+
+.summary-item .label {
+  color: #888;
+  font-size: 0.9rem;
+}
+
+.summary-item .value {
+  font-weight: bold;
+  font-family: monospace;
+}
+
+.summary-item .value.good {
+  color: #2ecc71;
+}
+
+.summary-item .value.warning {
+  color: #f1c40f;
 }
 
 .no-battle {
   text-align: center;
-  padding: 4rem;
-  font-size: 1.2rem;
-  color: #888;
+  padding: 4rem 2rem;
+  background-color: rgba(0, 0, 0, 0.3);
+  border-radius: 12px;
+  margin-top: 2rem;
 }
 
-/* Type colors */
-.type-badge {
-  display: inline-block;
-  padding: 0.25rem 0.75rem;
-  border-radius: 4px;
-  font-size: 0.875rem;
+.no-battle h2 {
+  color: #95a5a6;
+  margin-bottom: 1rem;
+}
+
+.no-battle p {
+  color: #7f8c8d;
+  font-size: 1.1rem;
+  margin-bottom: 2rem;
+}
+
+.setup-button {
+  padding: 1rem 2rem;
+  background-color: #3498db;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 1.1rem;
   font-weight: bold;
-  margin: 0.25rem;
-  text-transform: uppercase;
+  cursor: pointer;
+  transition: all 0.3s ease;
 }
 
-.type-normal { background-color: #A8A878; }
-.type-fire { background-color: #F08030; }
-.type-water { background-color: #6890F0; }
-.type-electric { background-color: #F8D030; }
-.type-grass { background-color: #78C850; }
-.type-ice { background-color: #98D8D8; }
-.type-fighting { background-color: #C03028; }
-.type-poison { background-color: #A040A0; }
-.type-ground { background-color: #E0C068; }
-.type-flying { background-color: #A890F0; }
-.type-psychic { background-color: #F85888; }
-.type-bug { background-color: #A8B820; }
-.type-rock { background-color: #B8A038; }
-.type-ghost { background-color: #705898; }
-.type-dragon { background-color: #7038F8; }
-.type-dark { background-color: #705848; }
-.type-steel { background-color: #B8B8D0; }
+.setup-button:hover {
+  background-color: #2980b9;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(52, 152, 219, 0.3);
+}
 
-/* Tier colors */
-.tier-S { color: #ff6b6b; }
-.tier-A { color: #f39c12; }
-.tier-B { color: #f1c40f; }
-.tier-C { color: #3498db; }
-.tier-D { color: #95a5a6; }
+.rom-controls {
+  position: fixed;
+  bottom: 2rem;
+  right: 2rem;
+  z-index: 100;
+}
+
+.reanalyze-button {
+  padding: 0.75rem 1.5rem;
+  background-color: rgba(52, 73, 94, 0.9);
+  color: #ecf0f1;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  backdrop-filter: blur(10px);
+}
+
+.reanalyze-button:hover {
+  background-color: rgba(52, 73, 94, 1);
+  border-color: rgba(255, 255, 255, 0.3);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
 
 /* Responsive design */
-@media (max-width: 1200px) {
-  .battle-container {
+@media (max-width: 768px) {
+  .App-header {
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .App-header h1 {
+    font-size: 1.5rem;
+  }
+
+  .App-main {
+    padding: 1rem;
+  }
+
+  .summary-content {
     grid-template-columns: 1fr;
+  }
+
+  .rom-controls {
+    bottom: 1rem;
+    right: 1rem;
   }
 }

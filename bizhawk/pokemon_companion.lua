@@ -1,239 +1,217 @@
--- Pokemon Companion Connector for BizHawk
--- Version with automatic domain fix
+-- Pokemon Companion Tool - Custom Addresses for Your ROM
+-- Uses the addresses found by memory search
 
--- Load socket library
 local socket = require("socket.core")
 
--- FIRST: Fix the memory domain issue
-print("Fixing memory domain...")
-if memory.usememorydomain and memory.getmemorydomainlist then
-    local domains = memory.getmemorydomainlist()
-    for _, domain in ipairs(domains) do
-        if domain == "System Bus" or domain == "System" or domain == "Main Memory" then
-            memory.usememorydomain(domain)
-            print("Set memory domain to: " .. domain)
-            break
-        end
-    end
-end
-
 -- Configuration
-local SERVER_HOST = "127.0.0.1"
-local SERVER_PORT = 17242
-local RECONNECT_DELAY = 300
-local UPDATE_INTERVAL = 30
-
--- State
-local connection = nil
+local COMPANION_PORT = 17242
+local tcp_socket = nil
 local connected = false
-local reconnect_timer = 0
-local update_timer = 0
-local last_enemy_species = 0
+local frame_count = 0
+local last_send = 0
 
--- Pokemon Emerald Memory Addresses
-local POKE_ADDR = {
-    in_battle = 0x02022FEC,
-    enemy_active = 0x02024744,
-    party_base = 0x02024284,
+-- YOUR CUSTOM MEMORY ADDRESSES (found by search)
+local MEMORY = {
+    IN_BATTLE = 0x02022FEC,      -- Battle flag (standard)
+    PARTY_PLAYER = 0x0200EB5C,   -- Your custom player address
+    PARTY_ENEMY = 0x0200EBE8     -- Your custom enemy address
 }
 
--- Memory read functions - ALWAYS use mainmemory
-local function read_byte(addr)
-    return mainmemory.readbyte(addr)
-end
+-- Pokemon data offsets (standard for all Gen 3)
+local POKEMON_OFFSETS = {
+    species = 0x20,
+    level = 0x54,
+    hp_current = 0x56,
+    hp_max = 0x58,
+    attack = 0x5A,
+    defense = 0x5C,
+    speed = 0x5E,
+    sp_attack = 0x60,
+    sp_defense = 0x62,
+    moves = 0x2C
+}
 
-local function read_u16(addr)
-    return mainmemory.read_u16_le(addr)
-end
+memory.usememorydomain("System Bus")
 
 -- Connect to server
-local function connect()
-    print("Connecting to " .. SERVER_HOST .. ":" .. SERVER_PORT .. "...")
+function connect()
+    tcp_socket = socket.tcp()
+    tcp_socket:settimeout(1)
     
-    local sock = socket.tcp()
-    sock:settimeout(1)
-    
-    local success, err = sock:connect(SERVER_HOST, SERVER_PORT)
-    if not success then
-        print("Connection failed: " .. tostring(err))
+    if tcp_socket:connect("localhost", COMPANION_PORT) then
+        tcp_socket:settimeout(0)
+        connected = true
+        console.log("Connected to companion server!")
+        return true
+    else
+        console.log("Failed to connect")
         return false
     end
-    
-    sock:settimeout(0)
-    connection = sock
-    connected = true
-    
-    print("Connected to Pokemon Companion!")
-    
-    -- Send handshake
-    connection:send("Hello|BizHawk|BizHawk|" .. gameinfo.getromname() .. "\n")
-    
-    return true
 end
 
--- Disconnect
-local function disconnect()
-    if connection then
-        pcall(function()
-            connection:send("Goodbye|BizHawk\n")
-            connection:close()
-        end)
-        connection = nil
-    end
-    connected = false
-end
-
--- Send message
-local function send_message(msg)
+-- Send JSON message
+function send_json(msg_type, data)
     if not connected then return false end
     
-    local success, err = pcall(function()
-        connection:send(msg .. "\n")
-    end)
+    local json = '{"type":"' .. msg_type .. '","data":' .. table_to_json(data) .. '}\n'
+    local ok = tcp_socket:send(json)
     
-    if not success then
-        print("Send error: " .. tostring(err))
-        disconnect()
+    if not ok then
+        connected = false
+        console.log("Disconnected")
         return false
     end
-    
     return true
+end
+
+-- JSON encoder
+function table_to_json(t)
+    local json = "{"
+    local first = true
+    for k,v in pairs(t) do
+        if not first then json = json .. "," end
+        first = false
+        json = json .. '"' .. k .. '":'
+        if type(v) == "table" then
+            json = json .. table_to_json(v)
+        elseif type(v) == "string" then
+            json = json .. '"' .. v .. '"'
+        elseif type(v) == "boolean" then
+            json = json .. (v and "true" or "false")
+        else
+            json = json .. tostring(v)
+        end
+    end
+    return json .. "}"
 end
 
 -- Read Pokemon data
-local function read_pokemon(base_addr)
-    -- Read at two possible species offsets
-    local species = read_u16(base_addr)
-    if species == 0 or species > 500 then
-        species = read_u16(base_addr + 0x20)
-    end
+function read_pokemon(addr)
+    local species = memory.read_u16_le(addr + POKEMON_OFFSETS.species)
     
-    if species == 0 or species > 500 then
+    -- Validate
+    if species == 0 or species > 411 then
         return nil
     end
     
-    return {
+    local level = memory.readbyte(addr + POKEMON_OFFSETS.level)
+    if level == 0 or level > 100 then
+        return nil
+    end
+    
+    -- Read all data
+    local pokemon = {
         species = species,
-        level = read_byte(base_addr + 0x54),
-        hp_current = read_u16(base_addr + 0x56),
-        hp_max = read_u16(base_addr + 0x58),
-        attack = read_u16(base_addr + 0x5A),
-        defense = read_u16(base_addr + 0x5C),
-        speed = read_u16(base_addr + 0x5E),
-        sp_attack = read_u16(base_addr + 0x60),
-        sp_defense = read_u16(base_addr + 0x62)
+        level = level,
+        hp = {
+            current = memory.read_u16_le(addr + POKEMON_OFFSETS.hp_current),
+            max = memory.read_u16_le(addr + POKEMON_OFFSETS.hp_max)
+        },
+        stats = {
+            attack = memory.read_u16_le(addr + POKEMON_OFFSETS.attack),
+            defense = memory.read_u16_le(addr + POKEMON_OFFSETS.defense),
+            speed = memory.read_u16_le(addr + POKEMON_OFFSETS.speed),
+            spAttack = memory.read_u16_le(addr + POKEMON_OFFSETS.sp_attack),
+            spDefense = memory.read_u16_le(addr + POKEMON_OFFSETS.sp_defense)
+        },
+        moves = {}
     }
+    
+    -- Read moves
+    for i = 0, 3 do
+        local move = memory.read_u16_le(addr + POKEMON_OFFSETS.moves + (i * 2))
+        if move > 0 and move < 500 then
+            table.insert(pokemon.moves, move)
+        end
+    end
+    
+    return pokemon
 end
 
--- Simple JSON encoder
-local function to_json(t)
-    if type(t) == "table" then
-        local parts = {}
-        for k, v in pairs(t) do
-            table.insert(parts, '"' .. k .. '":' .. to_json(v))
+-- Main frame handler
+function on_frame()
+    frame_count = frame_count + 1
+    
+    -- Reconnect if needed
+    if not connected and frame_count % 300 == 0 then
+        console.log("Reconnecting...")
+        connect()
+    end
+    
+    if not connected then return end
+    
+    -- Send data every 30 frames (0.5 seconds)
+    if frame_count - last_send < 30 then return end
+    last_send = frame_count
+    
+    -- Check if in battle
+    local in_battle = memory.readbyte(MEMORY.IN_BATTLE) ~= 0
+    
+    if in_battle then
+        -- Read Pokemon data
+        local player = read_pokemon(MEMORY.PARTY_PLAYER)
+        local enemy = read_pokemon(MEMORY.PARTY_ENEMY)
+        
+        if player and enemy then
+            -- Send battle update
+            send_json("battle_update", {
+                in_battle = true,
+                player = { active = player },
+                enemy = { active = enemy }
+            })
+            
+            -- Log occasionally for debugging
+            if frame_count % 300 == 0 then
+                console.log(string.format("Battle: Player %d vs Enemy %d", 
+                    player.species, enemy.species))
+            end
+        else
+            console.log("Failed to read Pokemon data")
         end
-        return "{" .. table.concat(parts, ",") .. "}"
-    elseif type(t) == "number" then
-        return tostring(t)
     else
-        return '"' .. tostring(t) .. '"'
+        -- Not in battle - send heartbeat
+        if frame_count % 120 == 0 then
+            send_json("heartbeat", { in_battle = false })
+        end
     end
 end
 
--- Check for battle
-local function check_battle()
-    -- Read enemy Pokemon
-    local enemy = read_pokemon(POKE_ADDR.enemy_active)
-    
-    if enemy then
-        -- In battle!
-        if enemy.species ~= last_enemy_species then
-            print("Battle detected! Enemy: #" .. enemy.species)
-            last_enemy_species = enemy.species
-            
-            -- Read player's first Pokemon
-            local player = read_pokemon(POKE_ADDR.party_base + 8)
-            
-            if player then
-                local battle_data = {
-                    player = player,
-                    enemy = enemy
-                }
-                
-                local json = to_json(battle_data)
-                send_message("BattleUpdate|" .. json)
-                print("Sent battle update to server")
-            end
-        end
-    else
-        -- Not in battle
-        if last_enemy_species ~= 0 then
-            print("Battle ended")
-            send_message("BattleEnd")
-            last_enemy_species = 0
-        end
+-- Cleanup on exit
+function on_exit()
+    console.log("Shutting down...")
+    if connected then
+        send_json("disconnect", { reason = "script_stopped" })
+        tcp_socket:close()
     end
 end
 
 -- Initialize
-print("========================================")
-print("Pokemon Companion Connector v3.0")
-print("========================================")
-print("ROM: " .. gameinfo.getromname())
+console.clear()
+console.log("==============================================")
+console.log("Pokemon Companion Tool - CUSTOM ADDRESSES")
+console.log("==============================================")
+console.log("")
+console.log("Using addresses found by memory search:")
+console.log(string.format("  Player: 0x%08X", MEMORY.PARTY_PLAYER))
+console.log(string.format("  Enemy: 0x%08X", MEMORY.PARTY_ENEMY))
+console.log("")
 
--- Initial connection
-if not connect() then
-    print("Failed to connect. Will retry every 5 seconds.")
+-- Verify system
+if emu.getsystemid() ~= "GBA" then
+    console.log("ERROR: This is for GBA only!")
+    return
 end
 
--- Main loop
-while true do
-    -- Handle reconnection
-    if not connected then
-        if reconnect_timer <= 0 then
-            if connect() then
-                reconnect_timer = 0
-            else
-                reconnect_timer = RECONNECT_DELAY
-            end
-        else
-            reconnect_timer = reconnect_timer - 1
-        end
-    end
-    
-    -- Check for server messages
-    if connected then
-        local success, data = pcall(function()
-            return connection:receive('*l')
-        end)
-        
-        if success and data then
-            print("Server: " .. data)
-        elseif not success and string.find(tostring(data), "closed") then
-            print("Server disconnected")
-            disconnect()
-        end
-    end
-    
-    -- Update battle state
-    if connected then
-        update_timer = update_timer + 1
-        if update_timer >= UPDATE_INTERVAL then
-            update_timer = 0
-            check_battle()
-        end
-    end
-    
-    -- GUI display
-    local color = connected and 0xFF00FF00 or 0xFFFF0000
-    local status = connected and "Connected" or "Disconnected"
-    gui.pixelText(2, 2, "Companion: " .. status, color)
-    
-    if not connected and reconnect_timer > 0 then
-        gui.pixelText(2, 12, string.format("Retry in %d", math.floor(reconnect_timer/60)), 0xFFFFFF00)
-    elseif last_enemy_species > 0 then
-        gui.pixelText(2, 12, "In Battle: #" .. last_enemy_species, 0xFFFFFF00)
-    end
-    
-    emu.frameadvance()
+-- Connect
+if connect() then
+    console.log("Ready! Battle data will appear in companion tool.")
+else
+    console.log("Make sure server is running!")
 end
+
+-- Register handlers
+event.onframestart(on_frame)
+event.onexit(on_exit)
+
+console.log("")
+console.log("Enter a Pokemon battle to see data!")

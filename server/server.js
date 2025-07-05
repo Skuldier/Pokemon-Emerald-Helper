@@ -1,9 +1,14 @@
+// server/server.js
+// Pokemon Companion Tool - Direct TCP Mode Only
+
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
 const net = require('net');
 const cors = require('cors');
+const multer = require('multer');
 const pokemonData = require('./pokemon-data');
+const ROMAnalyzer = require('./rom-analyzer');
 
 const app = express();
 app.use(cors());
@@ -18,170 +23,234 @@ const io = socketIo(server, {
 });
 
 // Configuration
-const TCP_PORT = 17242;
-const HTTP_PORT = 3001;
+const TCP_PORT = 17242; // BizHawk connection port
+const HTTP_PORT = 3001; // Web client port
 
 // State
+let tcpServer = null;
 let bizhawkClient = null;
 let battleState = null;
 let connectionStatus = 'disconnected';
+let romAnalysisResults = null;
 
-// Create TCP server for BizHawk connection
-const tcpServer = net.createServer((socket) => {
-  console.log('BizHawk attempting to connect...');
+// Configure multer for ROM uploads
+const storage = multer.memoryStorage();
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: 32 * 1024 * 1024 // 32MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    if (file.originalname.toLowerCase().endsWith('.gba')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only .gba files are allowed'));
+    }
+  }
+});
+
+const analyzer = new ROMAnalyzer();
+
+// Pokemon Emerald Memory Addresses
+let MEMORY = {
+  IN_BATTLE: 0x02022FEC,
+  BATTLE_TYPE: 0x02022FEE,
+  PARTY_PLAYER: 0x02024284,
+  PARTY_ENEMY: 0x02024744
+};
+
+// Create TCP server for BizHawk
+tcpServer = net.createServer((socket) => {
+  console.log('BizHawk connected via TCP!');
   bizhawkClient = socket;
+  connectionStatus = 'connected';
   
+  // Notify web clients
+  io.emit('connection-status', { status: 'connected' });
+  
+  // Buffer for incomplete messages
   let buffer = '';
   
   socket.on('data', (data) => {
     buffer += data.toString();
     
-    // Process complete lines
-    const lines = buffer.split('\n');
+    // Process complete messages (ending with newline)
+    let lines = buffer.split('\n');
     buffer = lines.pop(); // Keep incomplete line in buffer
     
-    lines.forEach(line => {
+    for (const line of lines) {
       if (line.trim()) {
-        handleBizHawkMessage(line.trim());
+        try {
+          const message = JSON.parse(line);
+          console.log('Received:', message.type);
+          handleBizhawkMessage(message);
+        } catch (err) {
+          console.error('Parse error:', err.message);
+          console.error('Raw data:', line);
+        }
       }
-    });
+    }
   });
   
-  socket.on('end', () => {
+  socket.on('close', () => {
     console.log('BizHawk disconnected');
     bizhawkClient = null;
     connectionStatus = 'disconnected';
     battleState = null;
+    
+    // Notify web clients
     io.emit('connection-status', { status: 'disconnected' });
     io.emit('battle-update', null);
   });
   
   socket.on('error', (err) => {
-    console.error('TCP Socket error:', err);
+    console.error('TCP error:', err.message);
   });
-  
-  // Send version info when client connects
-  socket.write('Version|PokemonCompanion|1.0|Server\n');
 });
 
-function handleBizHawkMessage(message) {
-  console.log('Received from BizHawk:', message);
-  
-  // Split message by pipe
-  const parts = message.split('|');
-  const command = parts[0];
-  
-  switch (command) {
-    case 'Hello':
-      console.log('BizHawk connected successfully');
-      connectionStatus = 'connected';
-      io.emit('connection-status', { status: 'connected' });
-      break;
-      
-    case 'BattleUpdate':
-      try {
-        const jsonData = parts.slice(1).join('|'); // Rejoin in case JSON contains pipes
-        const battleData = JSON.parse(jsonData);
-        processBattleData(battleData);
-      } catch (e) {
-        console.error('Failed to parse battle data:', e);
+// Handle messages from BizHawk
+function handleBizhawkMessage(message) {
+  switch (message.type) {
+    case 'battle_update':
+      if (message.data) {
+        battleState = processBattleData(message.data);
+        io.emit('battle-update', battleState);
       }
       break;
       
-    case 'BattleEnd':
-      console.log('Battle ended');
-      battleState = null;
-      io.emit('battle-update', null);
-      break;
-      
-    case 'PartyUpdate':
-      try {
-        const jsonData = parts.slice(1).join('|');
-        const partyData = JSON.parse(jsonData);
-        console.log('Party update received:', partyData.party.length, 'Pokemon');
-        // Handle party data if needed
-      } catch (e) {
-        console.error('Failed to parse party data:', e);
+    case 'heartbeat':
+      // Keep connection alive
+      if (message.data && !message.data.in_battle) {
+        if (battleState) {
+          battleState = null;
+          io.emit('battle-update', null);
+        }
       }
       break;
       
-    case 'Goodbye':
-      console.log('BizHawk disconnecting gracefully');
+    case 'disconnect':
+      console.log('BizHawk closing:', message.data?.reason || 'unknown');
+      break;
+      
+    case 'test':
+      console.log('Test message:', message.data);
       break;
       
     default:
-      console.log('Unknown command:', command);
+      console.log('Unknown message type:', message.type);
   }
 }
 
-function processBattleData(data) {
-  if (!data || !data.enemy || !data.player) {
-    console.log('Invalid battle data');
-    return;
+// Process battle data
+function processBattleData(rawData) {
+  if (!rawData || !rawData.enemy || !rawData.enemy.active) {
+    return null;
   }
   
-  try {
-    // Get Pokemon info from data files
-    const enemyInfo = pokemonData.getPokemonInfo(data.enemy.species);
-    const playerInfo = pokemonData.getPokemonInfo(data.player.species);
-    
-    // Calculate tier rating for enemy
-    const enemyTierRating = pokemonData.calculateTierRating(data.enemy, enemyInfo);
-    
-    // Calculate type effectiveness
-    const effectiveness = pokemonData.calculateTypeEffectiveness(
-      playerInfo.types,
-      enemyInfo.types
-    );
-    
-    // Build complete battle state
-    battleState = {
-      enemy: {
-        ...data.enemy,
-        info: enemyInfo,
-        tierRating: enemyTierRating
-      },
-      player: {
-        ...data.player,
-        info: playerInfo
-      },
-      effectiveness,
-      timestamp: Date.now()
-    };
-    
-    console.log(`Battle: ${playerInfo.name} (Lv.${data.player.level}) vs ${enemyInfo.name} (Lv.${data.enemy.level})`);
-    console.log(`Enemy Tier: ${enemyTierRating.tier} (Score: ${enemyTierRating.score})`);
-    
-    // Send to all connected web clients
-    io.emit('battle-update', battleState);
-  } catch (e) {
-    console.error('Error processing battle data:', e);
-  }
+  const enemyPokemon = rawData.enemy.active;
+  const playerPokemon = rawData.player.active;
+  
+  // Get Pokemon info
+  const enemyInfo = pokemonData.getPokemonInfo(enemyPokemon.species);
+  const playerInfo = pokemonData.getPokemonInfo(playerPokemon.species);
+  
+  // Calculate tier rating
+  const tierRating = pokemonData.calculateTierRating(enemyPokemon, enemyInfo);
+  
+  // Calculate type effectiveness
+  const effectiveness = pokemonData.calculateTypeEffectiveness(
+    playerInfo.types,
+    enemyInfo.types
+  );
+  
+  return {
+    enemy: {
+      ...enemyPokemon,
+      info: enemyInfo,
+      tierRating
+    },
+    player: {
+      ...playerPokemon,
+      info: playerInfo
+    },
+    effectiveness,
+    timestamp: Date.now()
+  };
 }
 
-// REST API endpoints
+// ROM Analysis endpoint
+app.post('/api/analyze-rom', upload.single('rom'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    console.log(`Analyzing ROM: ${req.file.originalname} (${req.file.size} bytes)`);
+
+    const results = await analyzer.analyzeROM(req.file.buffer);
+    romAnalysisResults = results;
+    
+    // Update memory addresses if DMA is disabled
+    if (results.memoryAddresses && results.dmaStatus?.disabled) {
+      if (results.memoryAddresses.partyPokemon) {
+        MEMORY.PARTY_PLAYER = results.memoryAddresses.partyPokemon;
+      }
+      if (results.memoryAddresses.enemyPokemon) {
+        MEMORY.PARTY_ENEMY = results.memoryAddresses.enemyPokemon;
+      }
+      console.log('Updated memory addresses based on ROM analysis');
+    }
+
+    res.json(results);
+    
+    // Notify clients
+    io.emit('rom-analyzed', {
+      dmaDisabled: results.dmaStatus?.disabled || false,
+      customAddresses: results.memoryAddresses
+    });
+
+  } catch (error) {
+    console.error('ROM analysis error:', error);
+    res.status(500).json({ 
+      error: 'Failed to analyze ROM',
+      details: error.message 
+    });
+  }
+});
+
+// ROM status endpoint
+app.get('/api/rom-status', (req, res) => {
+  if (romAnalysisResults) {
+    res.json({
+      analyzed: true,
+      dmaDisabled: romAnalysisResults.dmaStatus?.disabled || false,
+      gameId: romAnalysisResults.gameId,
+      patches: romAnalysisResults.patches
+    });
+  } else {
+    res.json({ analyzed: false });
+  }
+});
+
+// Status endpoint
 app.get('/api/status', (req, res) => {
   res.json({
     connection: connectionStatus,
-    hasBattleData: battleState !== null
+    hasBattleData: battleState !== null,
+    mode: 'direct'
   });
 });
 
+// Battle data endpoint
 app.get('/api/battle', (req, res) => {
   res.json(battleState);
 });
 
-app.get('/api/pokemon/:id', (req, res) => {
-  const id = parseInt(req.params.id);
-  const info = pokemonData.getPokemonInfo(id);
-  res.json(info);
-});
-
-// Socket.IO for real-time updates
+// Socket.IO for real-time web updates
 io.on('connection', (socket) => {
   console.log('Web client connected');
   
-  // Send current state
+  // Send current status
   socket.emit('connection-status', { status: connectionStatus });
   if (battleState) {
     socket.emit('battle-update', battleState);
@@ -194,12 +263,19 @@ io.on('connection', (socket) => {
 
 // Start servers
 tcpServer.listen(TCP_PORT, () => {
-  console.log(`TCP server listening on port ${TCP_PORT} for BizHawk connection`);
+  console.log('======================================');
+  console.log('Pokemon Companion Server - Direct Mode');
+  console.log('======================================');
+  console.log(`TCP server listening on port ${TCP_PORT} for BizHawk`);
+  console.log(`HTTP server will start on port ${HTTP_PORT} for web clients`);
 });
 
 server.listen(HTTP_PORT, () => {
-  console.log(`HTTP server listening on port ${HTTP_PORT} for web clients`);
-  console.log('\nWaiting for BizHawk to connect...');
+  console.log(`HTTP server started on port ${HTTP_PORT}`);
+  console.log('');
+  console.log('Ready for connections!');
+  console.log('- Load pokemon_companion.lua in BizHawk');
+  console.log('- Open http://localhost:3000 in your browser');
 });
 
 // Graceful shutdown
@@ -210,8 +286,12 @@ process.on('SIGINT', () => {
     bizhawkClient.end();
   }
   
-  tcpServer.close();
-  server.close();
+  tcpServer.close(() => {
+    console.log('TCP server closed');
+  });
   
-  process.exit(0);
+  server.close(() => {
+    console.log('HTTP server closed');
+    process.exit(0);
+  });
 });

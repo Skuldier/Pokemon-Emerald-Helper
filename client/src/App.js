@@ -1,38 +1,76 @@
+// client/src/App.js
+// Updated to include ROM upload functionality
+
 import React, { useState, useEffect } from 'react';
 import io from 'socket.io-client';
 import './App.css';
 import ConnectionStatus from './components/ConnectionStatus';
 import BattleDisplay from './components/BattleDisplay';
-import PokemonStats from './components/PokemonStats';
-import TierRating from './components/TierRating';
-import TypeEffectiveness from './components/TypeEffectiveness';
+import ROMUpload from './components/ROMUpload';
 
-const SOCKET_URL = 'http://localhost:3001';
+const socket = io('http://localhost:3001');
 
 function App() {
-  const [socket, setSocket] = useState(null);
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
   const [battleData, setBattleData] = useState(null);
+  const [showROMUpload, setShowROMUpload] = useState(true);
+  const [romAnalyzed, setRomAnalyzed] = useState(false);
+  const [analysisResults, setAnalysisResults] = useState(null);
 
   useEffect(() => {
-    // Initialize socket connection
-    const newSocket = io(SOCKET_URL);
-    setSocket(newSocket);
+    // Socket event listeners
+    socket.on('connect', () => {
+      console.log('Connected to companion server');
+    });
 
-    // Socket event handlers
-    newSocket.on('connection-status', (data) => {
+    socket.on('disconnect', () => {
+      console.log('Disconnected from companion server');
+    });
+
+    socket.on('connection-status', (data) => {
       setConnectionStatus(data.status);
     });
 
-    newSocket.on('battle-update', (data) => {
+    socket.on('battle-update', (data) => {
       setBattleData(data);
     });
 
-    // Cleanup on unmount
+    socket.on('rom-analyzed', (data) => {
+      console.log('ROM analysis complete:', data);
+      if (data.dmaDisabled) {
+        console.log('DMA protection is disabled - using optimized memory access');
+      }
+    });
+
+    // Check if ROM was already analyzed
+    fetch('http://localhost:3001/api/rom-status')
+      .then(res => res.json())
+      .then(data => {
+        if (data.analyzed) {
+          setRomAnalyzed(true);
+          setShowROMUpload(false);
+        }
+      })
+      .catch(err => console.error('Failed to check ROM status:', err));
+
     return () => {
-      newSocket.close();
+      socket.off('connect');
+      socket.off('disconnect');
+      socket.off('connection-status');
+      socket.off('battle-update');
+      socket.off('rom-analyzed');
     };
   }, []);
+
+  const handleROMAnalysis = (results) => {
+    setAnalysisResults(results);
+    setRomAnalyzed(true);
+    
+    // Auto-hide upload after successful analysis
+    setTimeout(() => {
+      setShowROMUpload(false);
+    }, 3000);
+  };
 
   return (
     <div className="App">
@@ -42,37 +80,66 @@ function App() {
       </header>
 
       <main className="App-main">
-        {battleData ? (
-          <div className="battle-container">
-            <div className="enemy-section">
-              <h2>Wild {battleData.enemy.info.name}</h2>
-              <BattleDisplay pokemon={battleData.enemy} />
-              <TierRating rating={battleData.enemy.tierRating} />
-            </div>
+        {!romAnalyzed && (
+          <div className="initial-setup">
+            <h2>Welcome to Pokemon Companion Tool</h2>
+            <p>For best performance, upload your Pokemon Emerald ROM to optimize memory reading.</p>
+          </div>
+        )}
 
-            <div className="info-section">
-              <TypeEffectiveness effectiveness={battleData.effectiveness} />
-              <PokemonStats 
-                pokemon={battleData.enemy} 
-                showDetails={true}
-              />
-            </div>
+        {showROMUpload && (
+          <ROMUpload onAnalysisComplete={handleROMAnalysis} />
+        )}
 
-            <div className="player-section">
-              <h3>Your {battleData.player.info.name}</h3>
-              <PokemonStats 
-                pokemon={battleData.player} 
-                showDetails={false}
-              />
+        {romAnalyzed && analysisResults && (
+          <div className="analysis-summary">
+            <h3>ROM Analysis Complete</h3>
+            <div className="summary-content">
+              <div className="summary-item">
+                <span className="label">Game:</span>
+                <span className="value">{analysisResults.gameId || 'Pokemon Emerald'}</span>
+              </div>
+              <div className="summary-item">
+                <span className="label">DMA Status:</span>
+                <span className={`value ${analysisResults.dmaStatus?.disabled ? 'good' : 'warning'}`}>
+                  {analysisResults.dmaStatus?.disabled ? 'Disabled ✓' : 'Active ⚠️'}
+                </span>
+              </div>
+              {analysisResults.patches.length > 0 && (
+                <div className="summary-item">
+                  <span className="label">Patches:</span>
+                  <span className="value">{analysisResults.patches.length} detected</span>
+                </div>
+              )}
             </div>
           </div>
+        )}
+
+        {battleData ? (
+          <BattleDisplay battleData={battleData} />
         ) : (
           <div className="no-battle">
-            {connectionStatus === 'connected' ? (
-              <p>Waiting for battle...</p>
-            ) : (
-              <p>Connect BizHawk to start</p>
+            <h2>No Battle Active</h2>
+            <p>Enter a Pokemon battle to see companion data</p>
+            {!romAnalyzed && (
+              <button 
+                className="setup-button"
+                onClick={() => setShowROMUpload(true)}
+              >
+                Upload ROM for Better Performance
+              </button>
             )}
+          </div>
+        )}
+
+        {romAnalyzed && !showROMUpload && (
+          <div className="rom-controls">
+            <button 
+              className="reanalyze-button"
+              onClick={() => setShowROMUpload(true)}
+            >
+              Upload Different ROM
+            </button>
           </div>
         )}
       </main>
