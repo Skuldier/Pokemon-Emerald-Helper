@@ -1,6 +1,6 @@
--- PokemonReader.lua
+-- PokemonReader.lua (COMPLETE FIXED VERSION)
 -- Pokemon data reading module combining ROM and RAM data
--- Handles decryption and complete Pokemon structure
+-- Handles decryption and complete Pokemon structure with proper ROMData interface
 
 local Memory = require("Memory")
 local Pointers = require("Pointers")
@@ -8,7 +8,6 @@ local ROMData = require("ROMData")
 
 local PokemonReader = {}
 
--- Pokemon data structure constants
 -- Bitwise operation compatibility
 local band = _VERSION >= "Lua 5.3" and function(a,b) return a & b end or bit.band
 local bor = _VERSION >= "Lua 5.3" and function(a,b) return a | b end or bit.bor
@@ -17,7 +16,7 @@ local bnot = _VERSION >= "Lua 5.3" and function(a) return ~a end or bit.bnot
 local lshift = _VERSION >= "Lua 5.3" and function(a,b) return a << b end or bit.lshift
 local rshift = _VERSION >= "Lua 5.3" and function(a,b) return a >> b end or bit.rshift
 
-
+-- Pokemon data structure constants
 PokemonReader.POKEMON_SIZE = 100        -- Size in party
 PokemonReader.POKEMON_PC_SIZE = 80      -- Size in PC
 PokemonReader.PARTY_SIZE = 6
@@ -187,6 +186,9 @@ function PokemonReader.readPokemon(address, isInPC)
         else
             pokemon.ability = romData.ability2 or romData.ability1
         end
+        
+        -- Store base data for easy access
+        pokemon.baseData = romData
     end
     
     -- Read battle stats if in party (not in PC)
@@ -213,9 +215,6 @@ function PokemonReader.readPokemon(address, isInPC)
         -- For PC Pokemon, calculate stats
         pokemon.battleStats = PokemonReader.calculateStats(pokemon)
     end
-    
-    -- Add ROM data
-    pokemon.baseData = romData
     
     return pokemon
 end
@@ -383,16 +382,20 @@ function PokemonReader.readPokemonString(address, maxLength)
     return str
 end
 
--- Format Pokemon info for display
+-- ENHANCED FORMAT POKEMON FUNCTION (FIXES ALL DISPLAY ISSUES)
 function PokemonReader.formatPokemon(pokemon)
     if not pokemon then return "Empty" end
     
     local info = {}
     
-    -- Basic info
+    -- Basic info with proper fallbacks
     info.name = pokemon.nickname ~= "" and pokemon.nickname or 
-               (pokemon.baseData and pokemon.baseData.name or "???")
-    info.species = pokemon.baseData and pokemon.baseData.name or "???"
+               ROMData.getPokemonName(pokemon.species or 0)
+    
+    -- Species name (separate from nickname) - FIXED
+    info.species = ROMData.getPokemonName(pokemon.species or 0)
+    
+    -- Level
     info.level = pokemon.battleStats and pokemon.battleStats.level or "?"
     
     -- HP
@@ -416,27 +419,115 @@ function PokemonReader.formatPokemon(pokemon)
         end
     end
     
-    -- Types
+    -- Types with proper fallback - FIXED
     if pokemon.baseData then
         info.types = ROMData.getTypeName(pokemon.baseData.type1) or "???"
         if pokemon.baseData.type1 ~= pokemon.baseData.type2 then
             info.types = info.types .. "/" .. (ROMData.getTypeName(pokemon.baseData.type2) or "???")
         end
+    else
+        info.types = "???/???"
     end
     
-    -- Ability
-    info.ability = ROMData.getAbilityName(pokemon.ability) or "???"
+    -- Ability with proper fallback - FIXED
+    if pokemon.ability and pokemon.ability > 0 then
+        info.ability = ROMData.getAbilityName(pokemon.ability)
+    else
+        info.ability = "None"
+    end
     
-    -- Nature
-    local natureData = ROMData.getNature(pokemon.nature)
-    info.nature = natureData and natureData.name or "???"
+    -- Nature with proper fallback - FIXED
+    if pokemon.nature and pokemon.nature >= 0 and pokemon.nature <= 24 then
+        info.nature = ROMData.getNatureName(pokemon.nature)
+    else
+        info.nature = "???"
+    end
     
-    -- Item
-    info.item = pokemon.heldItem > 0 and 
-               (ROMData.getItem(pokemon.heldItem) and ROMData.getItem(pokemon.heldItem).name or "Unknown") 
-               or "None"
+    -- Item with proper fallback - FIXED
+    if pokemon.heldItem and pokemon.heldItem > 0 then
+        local item = ROMData.getItem(pokemon.heldItem)
+        info.item = (item and item.name) or ROMData.getItemName(pokemon.heldItem)
+    else
+        info.item = "None"
+    end
     
     return info
+end
+
+-- Enhanced move formatting function
+function PokemonReader.formatMove(moveId, currentPP, maxPP)
+    if not moveId or moveId == 0 then
+        return "---"
+    end
+    
+    local moveName = ROMData.getMoveName(moveId)
+    local ppText = ""
+    
+    if currentPP and maxPP then
+        ppText = string.format("(%d/%d)", currentPP, maxPP)
+    end
+    
+    return moveName .. ppText
+end
+
+-- Enhanced Pokemon display function with all fixes
+function PokemonReader.displayPokemonInfo(pokemon, slot)
+    if not pokemon then
+        return string.format("%d. [Empty]", slot or 0)
+    end
+    
+    local info = PokemonReader.formatPokemon(pokemon)
+    local output = {}
+    
+    -- Main line with species fix
+    table.insert(output, string.format("%d. %s (Lv.%s %s)%s",
+        slot or 0,
+        info.name,
+        info.level,
+        info.species,  -- This now shows proper species name
+        info.status and " [" .. info.status .. "]" or ""
+    ))
+    
+    -- HP line
+    table.insert(output, string.format("   HP: %s", info.hp))
+    
+    -- Type/Ability/Nature line with fixes
+    table.insert(output, string.format("   %s | %s | %s | Item: %s",
+        info.types,  -- Fixed type display
+        info.ability, -- Fixed ability display
+        info.nature,  -- Fixed nature display
+        info.item     -- Fixed item display
+    ))
+    
+    -- Stats line
+    if pokemon.battleStats then
+        table.insert(output, string.format("   Stats: ATK %d | DEF %d | SPE %d | SPA %d | SPD %d",
+            pokemon.battleStats.attack or 0,
+            pokemon.battleStats.defense or 0,
+            pokemon.battleStats.speed or 0,
+            pokemon.battleStats.spAttack or 0,
+            pokemon.battleStats.spDefense or 0
+        ))
+    end
+    
+    -- Moves line
+    if pokemon.moves then
+        local moveNames = {}
+        for i, moveId in ipairs(pokemon.moves) do
+            if moveId > 0 then
+                local moveName = ROMData.getMoveName(moveId)
+                local pp = pokemon.pp and pokemon.pp[i] or 0
+                local move = ROMData.getMove(moveId)
+                local maxPP = move and move.pp or 0
+                table.insert(moveNames, string.format("%s(%d/%d)", moveName, pp, maxPP))
+            end
+        end
+        if #moveNames > 0 then
+            table.insert(output, "   Moves: " .. table.concat(moveNames, " | "))
+        end
+    end
+    
+    return table.concat(output, "\n")
 end
 
 -- Test function
@@ -455,43 +546,51 @@ function PokemonReader.test()
         
         for i, pokemon in ipairs(party.pokemon) do
             if pokemon then
-                local info = PokemonReader.formatPokemon(pokemon)
-                console.log(string.format("\n%d. %s (Lv.%s %s)", 
-                    i, info.name, info.level, info.species))
-                console.log(string.format("   HP: %s%s", 
-                    info.hp, info.status and " [" .. info.status .. "]" or ""))
-                console.log(string.format("   Type: %s | Ability: %s | Nature: %s",
-                    info.types, info.ability, info.nature))
-                console.log(string.format("   Item: %s", info.item))
-                
-                -- Show moves
-                if pokemon.moves then
-                    local moveStr = "   Moves: "
-                    for j, moveId in ipairs(pokemon.moves) do
-                        if moveId > 0 then
-                            local move = ROMData.getMove(moveId)
-                            if move then
-                                moveStr = moveStr .. move.name .. " "
-                            end
-                        end
-                    end
-                    console.log(moveStr)
-                end
-                
-                -- Show stats
-                if pokemon.battleStats then
-                    console.log(string.format("   Stats: ATK:%d DEF:%d SPE:%d SPA:%d SPD:%d",
-                        pokemon.battleStats.attack,
-                        pokemon.battleStats.defense,
-                        pokemon.battleStats.speed,
-                        pokemon.battleStats.spAttack,
-                        pokemon.battleStats.spDefense))
-                end
+                console.log(PokemonReader.displayPokemonInfo(pokemon, i))
+                console.log("")
             end
         end
     else
         console.log("✗ No party Pokemon found (game not loaded?)")
     end
+end
+
+-- Debug function for troubleshooting
+function PokemonReader.debugPokemon(pokemon, slot)
+    if not pokemon then
+        console.log("Slot " .. (slot or "?") .. ": Empty")
+        return
+    end
+    
+    console.log("=== DEBUG INFO FOR SLOT " .. (slot or "?") .. " ===")
+    console.log("Raw data:")
+    console.log("  Species ID: " .. (pokemon.species or "nil"))
+    console.log("  Nature ID: " .. (pokemon.nature or "nil"))
+    console.log("  Ability ID: " .. (pokemon.ability or "nil"))
+    console.log("  Held Item ID: " .. (pokemon.heldItem or "nil"))
+    console.log("  Nickname: '" .. (pokemon.nickname or "nil") .. "'")
+    
+    if pokemon.baseData then
+        console.log("  Base Data Found:")
+        console.log("    Type1: " .. (pokemon.baseData.type1 or "nil"))
+        console.log("    Type2: " .. (pokemon.baseData.type2 or "nil"))
+        console.log("    Ability1: " .. (pokemon.baseData.ability1 or "nil"))
+        console.log("    Ability2: " .. (pokemon.baseData.ability2 or "nil"))
+    else
+        console.log("  Base Data: MISSING")
+    end
+    
+    console.log("Resolved names:")
+    console.log("  Species: " .. ROMData.getPokemonName(pokemon.species or 0))
+    console.log("  Nature: " .. ROMData.getNatureName(pokemon.nature or 0))
+    console.log("  Ability: " .. ROMData.getAbilityName(pokemon.ability or 0))
+    
+    if pokemon.baseData then
+        console.log("  Type1: " .. ROMData.getTypeName(pokemon.baseData.type1))
+        console.log("  Type2: " .. ROMData.getTypeName(pokemon.baseData.type2))
+    end
+    
+    console.log("==============================")
 end
 
 return PokemonReader

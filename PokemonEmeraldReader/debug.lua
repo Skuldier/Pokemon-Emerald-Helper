@@ -1,77 +1,52 @@
--- debug.lua
--- Debug launcher to find out why nothing is showing
+-- find_money.lua
+-- Search for $3000 near player data
+
+local Memory = require("Memory")
 
 console.clear()
-console.log("=== DEBUG MODE ===")
-console.log("Starting Pokemon Emerald Memory Reader Debug...")
+console.log("=== Searching for Money $3000 ===\n")
 
--- Check if we can even print
-console.log("1. Console output is working")
+local PLAYER_START = 0x02025C72  -- Found player data start
+local TARGET_MONEY = 3000        -- Your actual money
 
--- Check module path
-console.log("2. Module path: " .. package.path)
+console.log(string.format("Player data starts at: 0x%08X", PLAYER_START))
+console.log(string.format("Looking for money value: $%d (0x%08X)", TARGET_MONEY, TARGET_MONEY))
+console.log("\nSearching nearby areas...\n")
 
--- Try to load each module one by one
-local modules = {"Memory", "Pointers", "ROMData", "PokemonReader"}
-local loaded = {}
-
-for i, modname in ipairs(modules) do
-    console.log(string.format("3.%d. Loading %s...", i, modname))
-    local success, result = pcall(require, modname)
-    if success then
-        console.log("     ✓ Loaded successfully")
-        loaded[modname] = result
-    else
-        console.log("     ✗ ERROR: " .. tostring(result))
-        console.log("     Script stopping here.")
-        return
-    end
-end
-
-console.log("4. All modules loaded!")
-
--- Try to run basic Memory test
-console.log("5. Testing Memory module...")
-if loaded.Memory then
-    local testRead = loaded.Memory.read_u32_le(0x08000000)
-    if testRead then
-        console.log("   ✓ Memory read successful: " .. string.format("0x%08X", testRead))
-    else
-        console.log("   ✗ Memory read failed")
-    end
-end
-
--- Check if ROM is loaded
-console.log("6. Checking if ROM is loaded...")
-local gameCode = loaded.Memory.readbytes(0x080000AC, 4)
-if gameCode then
-    local codeStr = ""
-    for i, byte in ipairs(gameCode) do
-        if byte then
-            codeStr = codeStr .. string.char(byte)
+-- Search around player data
+for offset = 0, 0x600, 4 do
+    local addr = PLAYER_START + offset
+    local value = Memory.read_u32_le(addr)
+    
+    if value == TARGET_MONEY then
+        console.log(string.format("✓ Found $3000 at offset +0x%03X (address: 0x%08X)", offset, addr))
+        
+        -- Show surrounding values to verify
+        console.log("\n  Nearby values:")
+        for i = -8, 8, 4 do
+            local nearAddr = addr + i
+            local nearVal = Memory.read_u32_le(nearAddr)
+            if nearVal then
+                console.log(string.format("    [%+3d] 0x%08X: %d", i, nearAddr, nearVal))
+            end
         end
     end
-    console.log("   Game code: " .. codeStr)
-else
-    console.log("   ✗ Could not read game code - is a ROM loaded?")
 end
 
--- Try to load main
-console.log("7. Loading main.lua...")
-local success, err = pcall(require, "main")
-if not success then
-    console.log("   ✗ ERROR loading main.lua:")
-    console.log("   " .. tostring(err))
-else
-    console.log("   ✓ Main loaded successfully")
+-- Also check if money is stored as 16-bit
+console.log("\n\nChecking 16-bit values...")
+for offset = 0, 0x600, 2 do
+    local addr = PLAYER_START + offset
+    local value = Memory.read_u16_le(addr)
+    
+    if value == TARGET_MONEY then
+        console.log(string.format("✓ Found $3000 (16-bit) at offset +0x%03X (address: 0x%08X)", offset, addr))
+    end
 end
 
-console.log("\n=== DEBUG COMPLETE ===")
-console.log("If you see this, the basic system is working.")
-console.log("Check for errors above.")
-console.log("\nPress any key to exit debug mode...")
+console.log("\n=== Search Complete ===")
+console.log("\nPress any key to exit...")
 
--- Wait for input
 while true do
     if next(input.get()) then break end
     emu.frameadvance()
