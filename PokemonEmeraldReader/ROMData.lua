@@ -398,21 +398,21 @@ function ROMData.readPokemonString(addr, maxLength)
         elseif char == 0xAF then
             str = str .. "."
         elseif char == 0xB0 then
-            str = str .. "…"
+            str = str .. "..."  -- Ellipsis
         elseif char == 0xB1 then
-            str = str .. """
+            str = str .. "\""   -- Left double quote
         elseif char == 0xB2 then
-            str = str .. """
+            str = str .. "\""   -- Right double quote
         elseif char == 0xB3 then
-            str = str .. "'"
+            str = str .. "'"    -- Left single quote
         elseif char == 0xB4 then
-            str = str .. "'"
+            str = str .. "'"    -- Right single quote
         elseif char == 0xB5 then
-            str = str .. "♂"
+            str = str .. "M"    -- Male symbol
         elseif char == 0xB6 then
-            str = str .. "♀"
+            str = str .. "F"    -- Female symbol
         elseif char == 0xBA then
-            str = str .. "é"
+            str = str .. "e"    -- e with accent
         end
     end
     return str
