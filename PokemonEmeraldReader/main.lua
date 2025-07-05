@@ -1,6 +1,6 @@
--- main.lua
+-- main_archipelago.lua
 -- Pokemon Emerald Memory Reader for BizHawk
--- Overcomes the 32KB EWRAM limitation using hybrid ROM/RAM approach
+-- Modified to work with Archipelago and other patched ROMs
 
 -- Load modules
 local Memory = require("Memory")
@@ -28,6 +28,9 @@ local Config = {
     
     -- Performance
     cacheLifetime = 300,        -- 5 seconds
+    
+    -- Archipelago mode
+    archipelagoMode = false,    -- Set to true if patch detected
 }
 
 -- State tracking
@@ -51,37 +54,89 @@ function init()
     console.clear()
     console.log("==============================================")
     console.log("Pokemon Emerald Memory Reader v1.0")
+    console.log("(Archipelago Compatible)")
     console.log("==============================================")
     console.log("Initializing...")
     
-    -- Verify Pokemon Emerald
+    -- Try multiple methods to verify Pokemon Emerald
+    local isEmerald = false
+    local gameInfo = "Unknown"
+    
+    -- Method 1: Standard game code location
     local gameCode = Memory.readbytes(0x080000AC, 4)
-    if not gameCode then
-        console.log("ERROR: Failed to read ROM")
-        return false
+    if gameCode then
+        local codeStr = ""
+        for i, byte in ipairs(gameCode) do
+            if byte then
+                codeStr = codeStr .. string.char(byte)
+            end
+        end
+        
+        if codeStr == "BPEE" then
+            isEmerald = true
+            gameInfo = "Pokemon Emerald (Vanilla)"
+        else
+            console.log("Game code: " .. codeStr .. " (not standard BPEE)")
+        end
+    else
+        console.log("Warning: Could not read game code at standard location")
     end
     
-    local codeStr = ""
-    for i, byte in ipairs(gameCode) do
-        codeStr = codeStr .. string.char(byte)
+    -- Method 2: Check ROM title
+    local romTitle = Memory.readstring(0x080000A0, 12)
+    if romTitle and romTitle:find("POKEMON EMER") then
+        isEmerald = true
+        if gameInfo == "Unknown" then
+            gameInfo = "Pokemon Emerald (Modified Header)"
+        end
     end
     
-    if codeStr ~= "BPEE" then
-        console.log("ERROR: Not Pokemon Emerald (found: " .. codeStr .. ")")
-        console.log("This tool only works with Pokemon Emerald")
-        return false
+    -- Method 3: Check for known data patterns
+    if not isEmerald then
+        -- Check for Pokemon base stats table signature
+        local statsCheck = Memory.read_u32_le(0x083203CC)
+        if statsCheck == 0x2D2D0803 then  -- Bulbasaur's stats pattern
+            isEmerald = true
+            gameInfo = "Pokemon Emerald (Pattern Match)"
+        end
     end
     
-    console.log("✓ Pokemon Emerald detected")
+    -- Method 4: Check for Archipelago signature
+    local archSig = Memory.readbytes(0x08F00000, 4)
+    if archSig then
+        local sigStr = ""
+        for i, byte in ipairs(archSig) do
+            if byte and byte ~= 0xFF then
+                sigStr = sigStr .. string.char(byte)
+            end
+        end
+        
+        if sigStr == "ARCH" then
+            isEmerald = true
+            gameInfo = "Pokemon Emerald (Archipelago)"
+            Config.archipelagoMode = true
+            console.log("✓ Archipelago patch detected!")
+        end
+    end
+    
+    if not isEmerald then
+        console.log("\nWARNING: Pokemon Emerald not detected!")
+        console.log("The tool may not work correctly.")
+        console.log("Continuing anyway...")
+        gameInfo = "Unknown GBA ROM"
+    else
+        console.log("✓ " .. gameInfo .. " detected")
+    end
     
     -- Load ROM data
-    console.log("Loading ROM data...")
+    console.log("\nLoading ROM data...")
     local romInitSuccess = ROMData.init()
     if not romInitSuccess then
-        console.log("ERROR: Failed to load ROM data")
-        return false
+        console.log("WARNING: Failed to load some ROM data")
+        console.log("Basic features will still work")
+    else
+        console.log("✓ ROM data loaded")
     end
-    console.log("✓ ROM data loaded")
     
     -- Check for patches
     if ROMData.data.patchInfo then
@@ -159,6 +214,9 @@ function displayParty()
     
     -- Header
     console.log("=== Pokemon Party Monitor ===")
+    if Config.archipelagoMode then
+        console.log("(Archipelago Mode)")
+    end
     
     -- Player info
     if State.playerInfo then
@@ -282,7 +340,8 @@ function outputData()
         timestamp = os.time(),
         frameCount = State.frameCount,
         player = State.playerInfo,
-        party = State.party
+        party = State.party,
+        archipelago = Config.archipelagoMode
     }
     
     local success, jsonStr = pcall(json.encode, data)
