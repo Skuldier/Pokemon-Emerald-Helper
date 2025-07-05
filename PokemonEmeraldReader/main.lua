@@ -1,24 +1,28 @@
 -- main.lua
 -- Pokemon Emerald Memory Reader for BizHawk
--- Modified to work with Archipelago and other patched ROMs
--- Now with battle display and tier ratings!
+-- Fixed version with proper ROM type detection
 
 -- Load modules
 local Memory = require("Memory")
 local ROMData = require("ROMData")
 local Pointers = require("Pointers")
 local PokemonReader = require("PokemonReader")
-local BattleDisplay = require("BattleDisplay")
 
 -- Optional JSON library for external output
 local hasJson, json = pcall(require, "json")
+
+-- Fallback addresses if using original ROMData.lua
+local VANILLA_ADDRESSES = {
+    pokemonStats = 0x083203CC,
+    pokemonNames = 0x08318608,
+    moveData = 0x0831C898
+}
 
 -- Configuration
 local Config = {
     -- Update intervals (in frames)
     updateInterval = 30,        -- Update display every 0.5 seconds (30 frames)
     fullUpdateInterval = 300,   -- Full update every 5 seconds
-    battleCheckInterval = 10,   -- Check for battles every 10 frames
     
     -- External output
     enableExternalOutput = false,
@@ -28,24 +32,10 @@ local Config = {
     showDetailedStats = true,
     showMoves = true,
     showIVsEVs = false,
-    showBattleInfo = true,
-    showTypeEffectiveness = true,
-    showTierBreakdown = true,
+    showBattle = false,
     
     -- Performance
     cacheLifetime = 300,        -- 5 seconds
-    
-    -- Archipelago mode
-    archipelagoMode = false,    -- Set to true if patch detected
-    
-    -- Tier symbols
-    tierSymbols = {
-        S = "⭐",
-        A = "✨",
-        B = "👍",
-        C = "⚡",
-        D = "⚠️"
-    }
 }
 
 -- State tracking
@@ -53,13 +43,12 @@ local State = {
     frameCount = 0,
     lastUpdate = 0,
     lastFullUpdate = 0,
-    lastBattleCheck = 0,
     isInitialized = false,
     
     -- Current data
     party = nil,
     playerInfo = nil,
-    currentBattle = nil,
+    battleData = nil,
     
     -- Statistics
     startTime = os.clock(),
@@ -75,89 +64,44 @@ function init()
     console.log("==============================================")
     console.log("Initializing...")
     
-    -- Try multiple methods to verify Pokemon Emerald
-    local isEmerald = false
-    local gameInfo = "Unknown"
-    
-    -- Method 1: Standard game code location
-    local gameCode = Memory.readbytes(0x080000AC, 4)
-    if gameCode then
-        local codeStr = ""
-        for i, byte in ipairs(gameCode) do
-            if byte then
-                codeStr = codeStr .. string.char(byte)
-            end
-        end
-        
-        if codeStr == "BPEE" then
-            isEmerald = true
-            gameInfo = "Pokemon Emerald (Vanilla)"
-        else
-            console.log("Game code: " .. codeStr .. " (not standard BPEE)")
-        end
-    else
-        console.log("Warning: Could not read game code at standard location")
-    end
-    
-    -- Method 2: Check ROM title
-    local romTitle = Memory.readstring(0x080000A0, 12)
-    if romTitle and romTitle:find("POKEMON EMER") then
-        isEmerald = true
-        if gameInfo == "Unknown" then
-            gameInfo = "Pokemon Emerald (Modified Header)"
-        end
-    end
-    
-    -- Method 3: Check for known data patterns
-    if not isEmerald then
-        -- Check for Pokemon base stats table signature
-        local statsCheck = Memory.read_u32_le(0x083203CC)
-        if statsCheck == 0x2D2D0803 then  -- Bulbasaur's stats pattern
-            isEmerald = true
-            gameInfo = "Pokemon Emerald (Pattern Match)"
-        end
-    end
-    
-    -- Method 4: Check for Archipelago signature
-    local archSig = Memory.readbytes(0x08F00000, 4)
-    if archSig then
-        local sigStr = ""
-        for i, byte in ipairs(archSig) do
-            if byte and byte ~= 0xFF then
-                sigStr = sigStr .. string.char(byte)
-            end
-        end
-        
-        if sigStr == "ARCH" then
-            isEmerald = true
-            gameInfo = "Pokemon Emerald (Archipelago)"
-            Config.archipelagoMode = true
-            console.log("✓ Archipelago patch detected!")
-        end
-    end
-    
-    if not isEmerald then
-        console.log("\nWARNING: Pokemon Emerald not detected!")
-        console.log("The tool may not work correctly.")
-        console.log("Continuing anyway...")
-        gameInfo = "Unknown GBA ROM"
-    else
-        console.log("✓ " .. gameInfo .. " detected")
-    end
-    
-    -- Load ROM data
+    -- First, initialize ROM data - this will detect ROM type
     console.log("\nLoading ROM data...")
     local romInitSuccess = ROMData.init()
+    
     if not romInitSuccess then
-        console.log("WARNING: Failed to load some ROM data")
-        console.log("Basic features will still work")
-    else
-        console.log("✓ ROM data loaded")
+        console.log("ERROR: Failed to initialize ROM data")
+        console.log("Make sure a Pokemon Emerald ROM is loaded")
+        return false
     end
     
-    -- Check for patches
-    if ROMData.data.patchInfo then
-        console.log("✓ Patch detected: " .. ROMData.data.patchInfo.type)
+    -- Get detection results from ROMData (compatible with original ROMData.lua)
+    local romType = ROMData.data and ROMData.data.romType or "vanilla"
+    local patchInfo = ROMData.data and ROMData.data.patchInfo
+    
+    -- If getROMType doesn't exist, do basic detection
+    if not romType and ROMData.data then
+        if patchInfo then
+            romType = "patched"
+        else
+            romType = "vanilla"
+        end
+    end
+    
+    -- Display detected ROM type
+    if patchInfo and patchInfo.type then
+        console.log("✓ Pokemon Emerald (" .. patchInfo.type .. " Patch) detected")
+        Config.archipelagoMode = (patchInfo.type == "Archipelago")
+    else
+        console.log("✓ Pokemon Emerald detected")
+        if patchInfo then
+            console.log("✓ Patch detected: " .. (patchInfo.type or "Custom"))
+        end
+    end
+    
+    -- Show active addresses being used (if function exists)
+    local addresses = ROMData.addresses or VANILLA_ADDRESSES
+    if addresses and addresses.pokemonStats then
+        console.log(string.format("\nUsing Pokemon data at: 0x%08X", addresses.pokemonStats))
     end
     
     -- Test memory access
@@ -181,58 +125,9 @@ function init()
     return true
 end
 
--- Check for battles
-function checkBattle()
-    -- Only check periodically
-    if State.frameCount - State.lastBattleCheck < Config.battleCheckInterval then
-        return
-    end
-    
-    State.lastBattleCheck = State.frameCount
-    
-    local enemyPokemon, battleState = BattleDisplay.readEnemyPokemon()
-    
-    if enemyPokemon and battleState then
-        -- New battle detected
-        if not State.currentBattle or State.currentBattle.species ~= enemyPokemon.species then
-            State.currentBattle = enemyPokemon
-            
-            -- Clear console and show battle info
-            console.clear()
-            
-            if battleState.isWildBattle then
-                BattleDisplay.displayWildEncounter(enemyPokemon)
-                
-                -- Show type effectiveness if we have a lead Pokemon
-                if State.party and State.party.pokemon[1] then
-                    local playerPokemon = State.party.pokemon[1]
-                    if playerPokemon.baseData and enemyPokemon.baseData then
-                        BattleDisplay.displayTypeEffectiveness(
-                            {playerPokemon.baseData.type1, playerPokemon.baseData.type2},
-                            {enemyPokemon.baseData.type1, enemyPokemon.baseData.type2}
-                        )
-                    end
-                end
-                
-                -- Add a divider before regular party display
-                console.log("\n" .. string.rep("-", 50) .. "\n")
-            elseif battleState.isTrainerBattle then
-                BattleDisplay.displayTrainerBattle(enemyPokemon)
-            end
-        end
-    else
-        State.currentBattle = nil
-    end
-end
-
 -- Update game data
 function update()
     State.frameCount = State.frameCount + 1
-    
-    -- Check for battles
-    if Config.showBattleInfo then
-        checkBattle()
-    end
     
     -- Quick update (every updateInterval frames)
     if State.frameCount - State.lastUpdate >= Config.updateInterval then
@@ -253,10 +148,18 @@ function quickUpdate()
     State.party = PokemonReader.readParty()
     State.totalReads = State.totalReads + 1
     
-    -- Update display (only if not in battle)
-    if not State.currentBattle then
-        displayParty()
+    -- Read battle data if enabled
+    if Config.showBattle then
+        -- Check if readBattleData function exists
+        if PokemonReader.readBattleData then
+            State.battleData = PokemonReader.readBattleData()
+        else
+            State.battleData = nil
+        end
     end
+    
+    -- Update display
+    displayParty()
     
     -- External output if enabled
     if Config.enableExternalOutput and hasJson then
@@ -282,8 +185,9 @@ function displayParty()
     
     -- Header
     console.log("=== Pokemon Party Monitor ===")
-    if Config.archipelagoMode then
-        console.log("(Archipelago Mode)")
+    local patchInfo = ROMData.data and ROMData.data.patchInfo
+    if patchInfo and patchInfo.type then
+        console.log("(" .. patchInfo.type .. " ROM)")
     end
     
     -- Player info
@@ -297,6 +201,12 @@ function displayParty()
     end
     
     console.log("-----------------------------")
+    
+    -- Battle info if enabled
+    if Config.showBattle and State.battleData then
+        displayBattle()
+        console.log("-----------------------------")
+    end
     
     -- Party Pokemon
     if State.party and State.party.count > 0 then
@@ -321,6 +231,36 @@ function displayParty()
     if stats.systemBusFallbacks > 0 then
         console.log(string.format("System Bus used: %d times (extended EWRAM access)",
             stats.systemBusFallbacks))
+    end
+end
+
+-- Display battle information
+function displayBattle()
+    if not State.battleData or not State.battleData.inBattle then
+        console.log("Not in battle")
+        return
+    end
+    
+    console.log("=== Battle ===")
+    
+    -- Player's active Pokemon
+    if State.battleData.playerMon then
+        local mon = State.battleData.playerMon
+        console.log(string.format("Your %s (Lv.%d) - HP: %d/%d",
+            mon.name or "???",
+            mon.level or 0,
+            mon.currentHP or 0,
+            mon.maxHP or 0))
+    end
+    
+    -- Opponent's Pokemon
+    if State.battleData.opponentMon then
+        local mon = State.battleData.opponentMon
+        console.log(string.format("Foe %s (Lv.%d) - HP: %d/%d",
+            mon.name or "???",
+            mon.level or 0,
+            mon.currentHP or 0,
+            mon.maxHP or 0))
     end
 end
 
@@ -407,10 +347,10 @@ function outputData()
     local data = {
         timestamp = os.time(),
         frameCount = State.frameCount,
+        romType = (ROMData.data and ROMData.data.romType) or "unknown",
         player = State.playerInfo,
         party = State.party,
-        archipelago = Config.archipelagoMode,
-        battle = State.currentBattle
+        battle = State.battleData
     }
     
     local success, jsonStr = pcall(json.encode, data)
@@ -449,8 +389,8 @@ function handleInput()
     end
     
     if keys["B"] then
-        Config.showBattleInfo = not Config.showBattleInfo
-        console.log("Battle display: " .. (Config.showBattleInfo and "ON" or "OFF"))
+        Config.showBattle = not Config.showBattle
+        console.log("Battle display: " .. (Config.showBattle and "ON" or "OFF"))
     end
     
     if keys["R"] then

@@ -1,12 +1,11 @@
--- ROMData.lua
+-- ROMData.lua (ENHANCED VERSION)
 -- Static data extraction from Pokemon Emerald ROM
--- All data here is read once from ROM and cached, avoiding DMA issues
+-- Now supports both vanilla and patched ROMs with dynamic address loading
 
 local Memory = require("Memory")
 
 local ROMData = {}
 
--- ROM addresses for Pokemon Emerald (US version)
 -- Bitwise operation compatibility
 local band = _VERSION >= "Lua 5.3" and function(a,b) return a & b end or bit.band
 local bor = _VERSION >= "Lua 5.3" and function(a,b) return a | b end or bit.bor
@@ -15,8 +14,8 @@ local bnot = _VERSION >= "Lua 5.3" and function(a) return ~a end or bit.bnot
 local lshift = _VERSION >= "Lua 5.3" and function(a,b) return a << b end or bit.lshift
 local rshift = _VERSION >= "Lua 5.3" and function(a,b) return a >> b end or bit.rshift
 
-
-ROMData.addresses = {
+-- Default vanilla ROM addresses
+local VANILLA_ADDRESSES = {
     -- Pokemon data
     pokemonStats = 0x083203CC,      -- Base stats
     pokemonNames = 0x08318608,      -- Species names
@@ -57,6 +56,215 @@ ROMData.addresses = {
     -- Text
     gameText = 0x08470E6C,          -- General game text
 }
+
+-- Active addresses (will be set based on ROM type)
+ROMData.addresses = {}
+
+-- Try to load patched addresses from external file
+function ROMData.loadPatchedAddresses()
+    -- Try to load memory map exported from GUI tool
+    local success, patchedMap = pcall(require, "patched_memory_map")
+    if success and patchedMap then
+        console.log("✓ Loaded patched ROM memory map")
+        return patchedMap
+    end
+    
+    -- Try alternate file names
+    local alternateNames = {
+        "memory_map",
+        "archipelago_memory_map",
+        "randomizer_memory_map"
+    }
+    
+    for _, name in ipairs(alternateNames) do
+        success, patchedMap = pcall(require, name)
+        if success and patchedMap then
+            console.log("✓ Loaded memory map: " .. name)
+            return patchedMap
+        end
+    end
+    
+    return nil
+end
+
+-- Detect ROM type and set appropriate addresses
+function ROMData.detectROMType()
+    console.log("Detecting ROM type...")
+    
+    -- Check game code
+    local gameCode = Memory.readbytes(0x080000AC, 4)
+    if not gameCode then
+        console.log("✗ Failed to read game code")
+        return "unknown"
+    end
+    
+    local codeStr = ""
+    for i, byte in ipairs(gameCode) do
+        if byte then
+            codeStr = codeStr .. string.char(byte)
+        end
+    end
+    
+    if codeStr ~= "BPEE" then
+        console.log("✗ Not Pokemon Emerald (code: " .. codeStr .. ")")
+        return "unknown"
+    end
+    
+    -- Check for patches by looking for data at patch locations
+    local patchChecks = {
+        {addr = 0x08F00000, name = "Archipelago"},
+        {addr = 0x08E00000, name = "Randomizer"},
+        {addr = 0x08D00000, name = "Custom"}
+    }
+    
+    for _, check in ipairs(patchChecks) do
+        local data = Memory.readbytes(check.addr, 4)
+        if data and data[1] ~= 0xFF then
+            console.log("✓ Detected " .. check.name .. " patch")
+            return "patched"
+        end
+    end
+    
+    -- Check if vanilla addresses contain expected data
+    local bulbasaurStats = Memory.readbytes(VANILLA_ADDRESSES.pokemonStats, 6)
+    if bulbasaurStats and 
+       bulbasaurStats[1] == 45 and  -- HP
+       bulbasaurStats[2] == 49 and  -- Attack
+       bulbasaurStats[3] == 49 then -- Defense
+        console.log("✓ Vanilla ROM detected")
+        return "vanilla"
+    end
+    
+    -- If we can't find Bulbasaur at vanilla location, it's probably patched
+    console.log("⚠ Data not at vanilla addresses - assuming patched ROM")
+    return "patched"
+end
+
+-- Search for relocated data using pattern matching
+function ROMData.searchForData()
+    console.log("Searching for relocated data...")
+    local foundAddresses = {}
+    
+    -- Search for Bulbasaur stats pattern
+    console.log("  Searching for Pokemon stats...")
+    local statsPattern = {45, 49, 49, 45, 65, 65} -- Bulbasaur's base stats
+    local statsAddr = ROMData.findPattern(0x08000000, 0x09000000, statsPattern)
+    if statsAddr then
+        foundAddresses.pokemonStats = statsAddr
+        console.log("  ✓ Found Pokemon stats at 0x" .. string.format("%08X", statsAddr))
+    end
+    
+    -- Search for BULBASAUR name
+    console.log("  Searching for Pokemon names...")
+    local namePattern = {0xC1, 0xD8, 0xCB, 0xC1, 0xBB, 0xD6, 0xBB, 0xD8, 0xD5} -- "BULBASAUR"
+    local nameAddr = ROMData.findPattern(0x08000000, 0x09000000, namePattern)
+    if nameAddr then
+        foundAddresses.pokemonNames = nameAddr
+        console.log("  ✓ Found Pokemon names at 0x" .. string.format("%08X", nameAddr))
+    end
+    
+    -- Search for Pound move data
+    console.log("  Searching for move data...")
+    local movePattern = {0, 40, 0, 100, 35} -- Pound: effect, power, type, accuracy, pp
+    local moveAddr = ROMData.findPattern(0x08000000, 0x09000000, movePattern)
+    if moveAddr then
+        foundAddresses.moveData = moveAddr
+        console.log("  ✓ Found move data at 0x" .. string.format("%08X", moveAddr))
+    end
+    
+    return foundAddresses
+end
+
+-- Pattern search function
+function ROMData.findPattern(startAddr, endAddr, pattern)
+    local patternLen = #pattern
+    local chunkSize = 0x10000 -- 64KB chunks
+    
+    for addr = startAddr, endAddr - patternLen, chunkSize do
+        -- Read chunk
+        local chunk = Memory.readbytes(addr, math.min(chunkSize + patternLen, endAddr - addr))
+        if not chunk then
+            goto continue
+        end
+        
+        -- Search within chunk
+        for i = 1, #chunk - patternLen do
+            local match = true
+            for j = 1, patternLen do
+                if chunk[i + j - 1] ~= pattern[j] then
+                    match = false
+                    break
+                end
+            end
+            
+            if match then
+                return addr + i - 1
+            end
+        end
+        
+        ::continue::
+    end
+    
+    return nil
+end
+
+-- Initialize addresses based on ROM type
+function ROMData.initAddresses()
+    local romType = ROMData.detectROMType()
+    
+    if romType == "vanilla" then
+        -- Use vanilla addresses
+        ROMData.addresses = VANILLA_ADDRESSES
+        console.log("Using vanilla ROM addresses")
+        
+    elseif romType == "patched" then
+        -- Try to load patched addresses
+        local patchedAddresses = ROMData.loadPatchedAddresses()
+        
+        if patchedAddresses then
+            -- Use loaded addresses
+            ROMData.addresses = patchedAddresses
+            console.log("Using loaded patched addresses")
+        else
+            -- Search for data
+            console.log("No address map found, searching for data...")
+            local foundAddresses = ROMData.searchForData()
+            
+            -- Merge found addresses with vanilla (as fallback)
+            ROMData.addresses = {}
+            for k, v in pairs(VANILLA_ADDRESSES) do
+                ROMData.addresses[k] = foundAddresses[k] or v
+            end
+            
+            -- Save found addresses for future use
+            ROMData.savePatchedAddresses(ROMData.addresses)
+        end
+    else
+        -- Unknown ROM type, use vanilla as fallback
+        console.log("Unknown ROM type, using vanilla addresses as fallback")
+        ROMData.addresses = VANILLA_ADDRESSES
+    end
+    
+    ROMData.data.romType = romType
+end
+
+-- Save found addresses to file for future use
+function ROMData.savePatchedAddresses(addresses)
+    local file = io.open("found_addresses.lua", "w")
+    if file then
+        file:write("-- Automatically detected addresses\n")
+        file:write("-- Generated by ROMData.lua\n\n")
+        file:write("return {\n")
+        
+        for k, v in pairs(addresses) do
+            file:write(string.format("    %s = 0x%08X,\n", k, v))
+        end
+        
+        file:write("}\n")
+        file:close()
+        console.log("✓ Saved detected addresses to found_addresses.lua")
+    end
+end
 
 -- Type effectiveness values
 ROMData.typeEffectiveness = {
@@ -106,7 +314,9 @@ ROMData.data = {
     natures = nil,
     types = nil,
     typeChart = nil,
-    initialized = false
+    initialized = false,
+    romType = nil,
+    patchInfo = nil
 }
 
 -- Initialize all ROM data
@@ -115,7 +325,10 @@ function ROMData.init()
         return true
     end
     
-    console.log("Loading ROM data...")
+    console.log("Initializing ROM data...")
+    
+    -- Initialize addresses based on ROM type
+    ROMData.initAddresses()
     
     -- Load all static data
     ROMData.data.pokemon = ROMData.loadPokemonData()
@@ -130,7 +343,8 @@ function ROMData.init()
     ROMData.data.patchInfo = ROMData.detectPatch()
     
     ROMData.data.initialized = true
-    console.log("ROM data loaded successfully")
+    console.log("ROM data initialized successfully")
+    console.log("ROM Type: " .. (ROMData.data.romType or "unknown"))
     
     return true
 end
@@ -139,6 +353,11 @@ end
 function ROMData.loadPokemonData()
     local data = {}
     local baseAddr = ROMData.addresses.pokemonStats
+    
+    if not baseAddr then
+        console.log("✗ Pokemon stats address not found")
+        return data
+    end
     
     -- Load base stats for all 411 Pokemon (including ???/Egg)
     for i = 0, 410 do
@@ -189,20 +408,27 @@ function ROMData.loadPokemonData()
             color = Memory.read_u8(addr + 25)
         }
         
-        -- Calculate base stat total
-        pokemon.bst = pokemon.stats.hp + pokemon.stats.attack + pokemon.stats.defense +
-                     pokemon.stats.speed + pokemon.stats.spAttack + pokemon.stats.spDefense
-        
-        data[i] = pokemon
+        -- Validate data
+        if pokemon.stats.hp then
+            -- Calculate base stat total
+            pokemon.bst = pokemon.stats.hp + pokemon.stats.attack + pokemon.stats.defense +
+                         pokemon.stats.speed + pokemon.stats.spAttack + pokemon.stats.spDefense
+            
+            data[i] = pokemon
+        end
     end
     
     -- Load Pokemon names
     local nameAddr = ROMData.addresses.pokemonNames
-    for i = 0, 410 do
-        local name = ROMData.readPokemonString(nameAddr + (i * 11), 11)
-        if data[i] then
-            data[i].name = name
+    if nameAddr then
+        for i = 0, 410 do
+            local name = ROMData.readPokemonString(nameAddr + (i * 11), 11)
+            if data[i] then
+                data[i].name = name
+            end
         end
+    else
+        console.log("⚠ Pokemon names address not found")
     end
     
     return data
@@ -212,6 +438,11 @@ end
 function ROMData.loadMoveData()
     local data = {}
     local baseAddr = ROMData.addresses.moveData
+    
+    if not baseAddr then
+        console.log("✗ Move data address not found")
+        return data
+    end
     
     -- Load data for all 355 moves
     for i = 0, 354 do
@@ -231,24 +462,30 @@ function ROMData.loadMoveData()
             -- Padding: 2 bytes
         }
         
-        -- Decode flags
-        move.makesContact = band(move.flags, 0x01) ~= 0
-        move.isProtectable = band(move.flags, 0x02) ~= 0
-        move.isMagicCoatAffected = band(move.flags, 0x04) ~= 0
-        move.isSnatchable = band(move.flags, 0x08) ~= 0
-        move.canMetronome = band(move.flags, 0x10) ~= 0
-        move.cannotSketch = band(move.flags, 0x20) ~= 0
-        
-        data[i] = move
+        if move.effect then
+            -- Decode flags
+            move.makesContact = band(move.flags, 0x01) ~= 0
+            move.isProtectable = band(move.flags, 0x02) ~= 0
+            move.isMagicCoatAffected = band(move.flags, 0x04) ~= 0
+            move.isSnatchable = band(move.flags, 0x08) ~= 0
+            move.canMetronome = band(move.flags, 0x10) ~= 0
+            move.cannotSketch = band(move.flags, 0x20) ~= 0
+            
+            data[i] = move
+        end
     end
     
     -- Load move names
     local nameAddr = ROMData.addresses.moveNames
-    for i = 0, 354 do
-        local name = ROMData.readPokemonString(nameAddr + (i * 13), 13)
-        if data[i] then
-            data[i].name = name
+    if nameAddr then
+        for i = 0, 354 do
+            local name = ROMData.readPokemonString(nameAddr + (i * 13), 13)
+            if data[i] then
+                data[i].name = name
+            end
         end
+    else
+        console.log("⚠ Move names address not found")
     end
     
     return data
@@ -258,6 +495,11 @@ end
 function ROMData.loadItemData()
     local data = {}
     local baseAddr = ROMData.addresses.itemData
+    
+    if not baseAddr then
+        console.log("✗ Item data address not found")
+        return data
+    end
     
     -- Load data for items (up to 377 in Emerald)
     for i = 0, 376 do
@@ -279,7 +521,9 @@ function ROMData.loadItemData()
             extraParameter = Memory.read_u32_le(addr + 40) -- Pointer
         }
         
-        data[i] = item
+        if item.name and item.name ~= "" then
+            data[i] = item
+        end
     end
     
     return data
@@ -289,6 +533,11 @@ end
 function ROMData.loadAbilityNames()
     local data = {}
     local baseAddr = ROMData.addresses.abilityNames
+    
+    if not baseAddr then
+        console.log("⚠ Ability names address not found")
+        return data
+    end
     
     -- Load 78 abilities (0-77)
     for i = 0, 77 do
@@ -304,6 +553,11 @@ function ROMData.loadNatureData()
     local data = {}
     local nameAddr = ROMData.addresses.natureNames
     
+    if not nameAddr then
+        console.log("⚠ Nature names address not found")
+        -- Return default nature data even without names
+    end
+    
     -- Nature stat modifiers (hardcoded in game)
     local natureModifiers = {
         -- [increased stat][decreased stat] = nature index
@@ -316,7 +570,7 @@ function ROMData.loadNatureData()
     
     -- Load 25 natures
     for i = 0, 24 do
-        local name = ROMData.readPokemonString(nameAddr + (i * 7), 7)
+        local name = nameAddr and ROMData.readPokemonString(nameAddr + (i * 7), 7) or "Nature " .. i
         
         -- Calculate stat modifiers
         local increased = nil
@@ -348,6 +602,18 @@ function ROMData.loadTypeNames()
     local data = {}
     local baseAddr = ROMData.addresses.typeNames
     
+    if not baseAddr then
+        -- Use hardcoded type names as fallback
+        local fallbackNames = {
+            "NORMAL", "FIGHTING", "FLYING", "POISON", "GROUND", "ROCK", "BUG", "GHOST", "STEEL",
+            "???", "FIRE", "WATER", "GRASS", "ELECTRIC", "PSYCHIC", "ICE", "DRAGON", "DARK"
+        }
+        for i = 0, 17 do
+            data[i] = fallbackNames[i + 1]
+        end
+        return data
+    end
+    
     -- Load 18 types (includes ???)
     for i = 0, 17 do
         local name = ROMData.readPokemonString(baseAddr + (i * 7), 7)
@@ -362,6 +628,11 @@ function ROMData.loadTypeChart()
     local data = {}
     local baseAddr = ROMData.addresses.typeEffectiveness
     
+    if not baseAddr then
+        console.log("⚠ Type effectiveness address not found")
+        return data
+    end
+    
     -- Read type chart until terminator
     local offset = 0
     while true do
@@ -374,11 +645,15 @@ function ROMData.loadTypeChart()
             break
         end
         
-        -- Store effectiveness
-        if not data[attacker] then
-            data[attacker] = {}
+        if attacker and defender and effectiveness then
+            -- Store effectiveness
+            if not data[attacker] then
+                data[attacker] = {}
+            end
+            data[attacker][defender] = effectiveness
+        else
+            break
         end
-        data[attacker][defender] = effectiveness
         
         offset = offset + 3
     end
@@ -391,7 +666,7 @@ function ROMData.readPokemonString(addr, maxLength)
     local str = ""
     for i = 0, maxLength - 1 do
         local char = Memory.read_u8(addr + i)
-        if char == 0xFF then break end  -- Terminator
+        if not char or char == 0xFF then break end  -- Terminator
         
         -- Basic character mapping (simplified)
         if char == 0x00 then
@@ -466,104 +741,6 @@ function ROMData.detectPatch()
     return nil
 end
 
--- NEW: Calculate randomizer tier for a Pokemon
-function ROMData.calculateRandomizerTier(pokemonId)
-    local pokemon = ROMData.getPokemon(pokemonId)
-    if not pokemon then return nil end
-    
-    -- Base stat total weight
-    local bstScore = math.min(pokemon.bst / 600, 1.0) * 100
-    
-    -- HP is crucial in randomizers
-    local hpScore = (pokemon.stats.hp / 255) * 150
-    
-    -- Speed for survival
-    local speedScore = (pokemon.stats.speed / 200) * 130
-    
-    -- Defensive stats
-    local defenseScore = ((pokemon.stats.defense + pokemon.stats.spDefense) / 400) * 120
-    
-    -- Type defensive score
-    local typeScore = ROMData.calculateTypeDefensiveScore(pokemon.type1, pokemon.type2) * 100
-    
-    -- Calculate weighted total
-    local totalScore = (
-        bstScore * 0.30 +
-        hpScore * 0.20 +
-        speedScore * 0.15 +
-        defenseScore * 0.20 +
-        typeScore * 0.15
-    )
-    
-    -- Determine tier
-    local tier, stars
-    if totalScore >= 90 then
-        tier = "S"
-        stars = 5
-    elseif totalScore >= 75 then
-        tier = "A"
-        stars = 4
-    elseif totalScore >= 60 then
-        tier = "B"
-        stars = 3
-    elseif totalScore >= 45 then
-        tier = "C"
-        stars = 2
-    else
-        tier = "D"
-        stars = 1
-    end
-    
-    return {
-        tier = tier,
-        stars = stars,
-        score = math.floor(totalScore),
-        details = {
-            bst = math.floor(bstScore),
-            hp = math.floor(hpScore),
-            speed = math.floor(speedScore),
-            defense = math.floor(defenseScore),
-            typing = math.floor(typeScore)
-        }
-    }
-end
-
--- NEW: Calculate defensive type score
-function ROMData.calculateTypeDefensiveScore(type1, type2)
-    if not ROMData.data.initialized then return 0.5 end
-    
-    local weaknesses = 0
-    local resistances = 0
-    local immunities = 0
-    
-    -- Check all type matchups
-    for atkType = 0, 17 do
-        local effectiveness = 10  -- Normal damage
-        
-        -- Check vs type1
-        if ROMData.data.typeChart[atkType] and ROMData.data.typeChart[atkType][type1] then
-            effectiveness = ROMData.data.typeChart[atkType][type1]
-        end
-        
-        -- Check vs type2 if different
-        if type2 ~= type1 and ROMData.data.typeChart[atkType] and ROMData.data.typeChart[atkType][type2] then
-            local eff2 = ROMData.data.typeChart[atkType][type2]
-            effectiveness = (effectiveness * eff2) / 10
-        end
-        
-        if effectiveness > 10 then
-            weaknesses = weaknesses + 1
-        elseif effectiveness < 10 and effectiveness > 0 then
-            resistances = resistances + 1
-        elseif effectiveness == 0 then
-            immunities = immunities + 1
-        end
-    end
-    
-    -- Score based on defensive profile (0.0 to 1.0)
-    return math.min(1.0, math.max(0.0, 0.5 + (resistances * 0.05) + (immunities * 0.1) - (weaknesses * 0.08)))
-end
-
 -- Getter functions
 function ROMData.getPokemon(species)
     if not ROMData.data.initialized then ROMData.init() end
@@ -604,6 +781,16 @@ function ROMData.getTypeEffectiveness(attackType, defenseType)
     return 10
 end
 
+-- Get current ROM type
+function ROMData.getROMType()
+    return ROMData.data.romType or "unknown"
+end
+
+-- Get active addresses
+function ROMData.getAddresses()
+    return ROMData.addresses
+end
+
 -- Test function
 function ROMData.test()
     console.log("=== ROM Data Module Test ===\n")
@@ -611,8 +798,15 @@ function ROMData.test()
     -- Initialize
     ROMData.init()
     
+    -- Show ROM type and addresses
+    console.log("ROM Type: " .. ROMData.getROMType())
+    console.log("\nActive addresses:")
+    console.log(string.format("  Pokemon Stats: 0x%08X", ROMData.addresses.pokemonStats or 0))
+    console.log(string.format("  Pokemon Names: 0x%08X", ROMData.addresses.pokemonNames or 0))
+    console.log(string.format("  Move Data: 0x%08X", ROMData.addresses.moveData or 0))
+    
     -- Test Pokemon data
-    console.log("Pokemon data test:")
+    console.log("\nPokemon data test:")
     local bulbasaur = ROMData.getPokemon(1)
     if bulbasaur then
         console.log(string.format("✓ #001 %s", bulbasaur.name or "???"))
