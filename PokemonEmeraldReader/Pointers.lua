@@ -1,10 +1,13 @@
 -- Pointers.lua
 -- IWRAM pointer management for Pokemon Emerald
--- Handles stable pointers that survive DMA relocations
+-- Fixed version with hardcoded party address for patched ROMs
 
 local Memory = require("Memory")
 
 local Pointers = {}
+
+-- HARDCODED ADDRESS FOR YOUR PATCHED ROM
+local PARTY_ADDRESS = 0x02025CC4  -- Found by debug script!
 
 -- Critical IWRAM pointers for Pokemon Emerald
 -- These addresses are in IWRAM and contain pointers to data in EWRAM
@@ -20,16 +23,9 @@ Pointers.addresses = {
     
     -- Battle pointers
     gBattleMons = 0x03004324,      -- Battle Pokemon data
-    gBattleTypeFlags = 0x02022FEC,  -- Battle type (wild, trainer, etc.)
+    gBattleTypeFlags = 0x030042DC, -- Battle type (wild, trainer, etc.)
     gBattleMainFunc = 0x03004300,  -- Current battle function
     gBattleResults = 0x03004318,   -- Battle results
-    
-    -- Battle state pointers (NEW)
-    gBattleScriptingBank = 0x02023FC4,  -- Current battling bank
-    gBattleStructPtr = 0x02023FF4,      -- Pointer to battle struct
-    gEnemyMonIndex = 0x02023D6C,        -- Current enemy mon index
-    gActiveBattler = 0x02023BC4,        -- Active battler
-    gBattlersCount = 0x02023BC5,        -- Number of battlers
     
     -- Game state
     gMain = 0x030022C0,            -- Main game structure
@@ -116,9 +112,6 @@ local cache = {
 -- Cache lifetime in frames (5 seconds at 60fps)
 local CACHE_LIFETIME = 300
 
--- Bitwise operations compatibility
-local band = _VERSION >= "Lua 5.3" and function(a,b) return a & b end or bit.band
-
 -- Read and validate a pointer
 function Pointers.readPointer(name)
     local addr = Pointers.addresses[name]
@@ -151,7 +144,19 @@ function Pointers.getSaveBlock1()
     -- Read pointer
     local ptr, err = Pointers.readPointer("gSaveBlock1")
     if not ptr then
-        return nil, err
+        -- For patched ROMs, return dummy structure with hardcoded addresses
+        return {
+            pointer = 0,
+            teamAndItems = PARTY_ADDRESS,  -- Use hardcoded address
+            playerName = PARTY_ADDRESS - 0x234,  -- Estimate player data location
+            playerGender = PARTY_ADDRESS - 0x234 + 0x08,
+            playerTrainerId = PARTY_ADDRESS - 0x234 + 0x0A,
+            playerSecretId = PARTY_ADDRESS - 0x234 + 0x0C,
+            playTimeHours = PARTY_ADDRESS - 0x234 + 0x0E,
+            playTimeFrames = PARTY_ADDRESS - 0x234 + 0x10,
+            money = PARTY_ADDRESS - 0x234 + 0x490,
+            coins = PARTY_ADDRESS - 0x234 + 0x494
+        }
     end
     
     -- Create SaveBlock1 structure
@@ -226,14 +231,67 @@ function Pointers.clearCache()
     cache.lastCacheTime = 0
 end
 
--- Get party address
+-- Get party address (FIXED FOR YOUR PATCHED ROM)
 function Pointers.getPartyAddress()
-    local saveBlock1 = Pointers.getSaveBlock1()
-    if not saveBlock1 then
-        return nil, "Failed to get SaveBlock1"
+    -- First, check if the hardcoded address has valid data
+    local count = Memory.read_u32_le(PARTY_ADDRESS)
+    if count and count >= 1 and count <= 6 then
+        -- Valid party count found at hardcoded address
+        return PARTY_ADDRESS
     end
     
-    return saveBlock1.teamAndItems
+    -- If not, try the normal pointer method
+    local saveBlock1 = Pointers.getSaveBlock1()
+    if saveBlock1 and saveBlock1.pointer ~= 0 then
+        local testCount = Memory.read_u32_le(saveBlock1.teamAndItems)
+        if testCount and testCount >= 0 and testCount <= 6 then
+            return saveBlock1.teamAndItems
+        end
+    end
+    
+    -- Last resort: search for party data
+    console.log("Searching for party data...")
+    local foundAddr = Pointers.searchForParty()
+    if foundAddr then
+        console.log("Found party at: 0x" .. string.format("%08X", foundAddr))
+        return foundAddr
+    end
+    
+    -- Default to hardcoded address
+    console.log("Using hardcoded party address: 0x" .. string.format("%08X", PARTY_ADDRESS))
+    return PARTY_ADDRESS
+end
+
+-- Search for party data pattern
+function Pointers.searchForParty()
+    -- Search common areas
+    local searchAreas = {
+        {start = 0x02024000, size = 0x4000},
+        {start = 0x02020000, size = 0x4000},
+        {start = 0x0202C000, size = 0x4000}
+    }
+    
+    for _, area in ipairs(searchAreas) do
+        for addr = area.start, area.start + area.size - 4, 4 do
+            local count = Memory.read_u32_le(addr)
+            
+            -- Look for valid party count
+            if count and count >= 1 and count <= 6 then
+                -- Verify it looks like Pokemon data
+                local personality = Memory.read_u32_le(addr + 4)
+                if personality and personality > 0 and personality < 0xFFFFFFFF then
+                    local hp = Memory.read_u16_le(addr + 4 + 86)
+                    local maxHp = Memory.read_u16_le(addr + 4 + 88)
+                    
+                    if hp and maxHp and hp <= maxHp and maxHp > 0 and maxHp < 1000 then
+                        return addr  -- Found it!
+                    end
+                end
+            end
+        end
+    end
+    
+    return nil
 end
 
 -- Get party count
@@ -257,13 +315,13 @@ function Pointers.getPartyPokemonAddress(slot)
         return nil, "Invalid slot: " .. slot
     end
     
-    local saveBlock1 = Pointers.getSaveBlock1()
-    if not saveBlock1 then
-        return nil, "Failed to get SaveBlock1"
+    local partyAddr = Pointers.getPartyAddress()
+    if not partyAddr then
+        return nil, "Failed to get party address"
     end
     
     -- Each Pokemon is 100 bytes
-    return saveBlock1.teamPokemon + (slot * 100)
+    return partyAddr + 4 + (slot * 100)
 end
 
 -- Get PC box address
@@ -295,6 +353,23 @@ function Pointers.getPlayerInfo()
         return nil
     end
     
+    -- For patched ROMs with null pointers, try to read from estimated location
+    if saveBlock1.pointer == 0 then
+        -- Player data should be 0x234 bytes before party data
+        local playerAddr = PARTY_ADDRESS - 0x234
+        
+        return {
+            name = Memory.readbytes(playerAddr, 8),
+            gender = Memory.read_u8(playerAddr + 0x08),
+            trainerId = Memory.read_u16_le(playerAddr + 0x0A),
+            secretId = Memory.read_u16_le(playerAddr + 0x0C),
+            playTimeHours = Memory.read_u16_le(playerAddr + 0x0E),
+            playTimeFrames = Memory.read_u8(playerAddr + 0x10),
+            money = Memory.read_u32_le(playerAddr + 0x490),
+            coins = Memory.read_u16_le(playerAddr + 0x494)
+        }
+    end
+    
     return {
         name = Memory.readbytes(saveBlock1.playerName, 8),
         gender = Memory.read_u8(saveBlock1.playerGender),
@@ -305,32 +380,6 @@ function Pointers.getPlayerInfo()
         money = Memory.read_u32_le(saveBlock1.money),
         coins = Memory.read_u16_le(saveBlock1.coins)
     }
-end
-
--- NEW: Get battle state
-function Pointers.getBattleState()
-    local battleFlags = Memory.read_u16_le(Pointers.addresses.gBattleTypeFlags)
-    if not battleFlags or battleFlags == 0 then
-        return nil  -- Not in battle
-    end
-    
-    return {
-        inBattle = true,
-        isWildBattle = band(battleFlags, 0x01) ~= 0,
-        isTrainerBattle = band(battleFlags, 0x08) ~= 0,
-        isDoubleBattle = band(battleFlags, 0x02) ~= 0,
-        flags = battleFlags
-    }
-end
-
--- NEW: Get enemy party address
-function Pointers.getEnemyPartyAddress()
-    -- Enemy party is at fixed offset from player party
-    local playerParty = Pointers.getPartyAddress()
-    if not playerParty then return nil end
-    
-    -- Enemy party is typically 0x4C0 bytes after player party
-    return playerParty + 0x4C0
 end
 
 -- Test function
@@ -356,7 +405,7 @@ function Pointers.test()
     if sb1 then
         console.log(string.format("✓ SaveBlock1 at 0x%08X", sb1.pointer))
         console.log(string.format("  Party data: 0x%08X", sb1.teamAndItems))
-        console.log(string.format("  PC boxes: 0x%08X", sb1.pcBoxes))
+        console.log(string.format("  PC boxes: 0x%08X", sb1.pcBoxes or 0))
     else
         console.log("✗ Failed to get SaveBlock1")
     end
@@ -377,6 +426,11 @@ function Pointers.test()
     
     -- Test party access
     console.log("\nParty test:")
+    local partyAddr = Pointers.getPartyAddress()
+    if partyAddr then
+        console.log(string.format("✓ Party address: 0x%08X", partyAddr))
+    end
+    
     local partyCount = Pointers.getPartyCount()
     console.log(string.format("Party count: %d", partyCount))
     
@@ -387,17 +441,7 @@ function Pointers.test()
         end
     end
     
-    -- Test battle functions
-    console.log("\nBattle functions test:")
-    console.log("- getBattleState: " .. (Pointers.getBattleState and "✓ Available" or "✗ Missing"))
-    console.log("- getEnemyPartyAddress: " .. (Pointers.getEnemyPartyAddress and "✓ Available" or "✗ Missing"))
-    
-    local battleState = Pointers.getBattleState()
-    if battleState then
-        console.log("  Currently in battle!")
-    else
-        console.log("  Not in battle")
-    end
+    console.log("\nHardcoded party address: 0x" .. string.format("%08X", PARTY_ADDRESS))
 end
 
 return Pointers
