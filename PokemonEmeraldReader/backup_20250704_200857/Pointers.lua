@@ -20,16 +20,9 @@ Pointers.addresses = {
     
     -- Battle pointers
     gBattleMons = 0x03004324,      -- Battle Pokemon data
-    gBattleTypeFlags = 0x02022FEC,  -- Battle type (wild, trainer, etc.)
+    gBattleTypeFlags = 0x030042DC, -- Battle type (wild, trainer, etc.)
     gBattleMainFunc = 0x03004300,  -- Current battle function
     gBattleResults = 0x03004318,   -- Battle results
-    
-    -- Battle state pointers (NEW)
-    gBattleScriptingBank = 0x02023FC4,  -- Current battling bank
-    gBattleStructPtr = 0x02023FF4,      -- Pointer to battle struct
-    gEnemyMonIndex = 0x02023D6C,        -- Current enemy mon index
-    gActiveBattler = 0x02023BC4,        -- Active battler
-    gBattlersCount = 0x02023BC5,        -- Number of battlers
     
     -- Game state
     gMain = 0x030022C0,            -- Main game structure
@@ -115,9 +108,6 @@ local cache = {
 
 -- Cache lifetime in frames (5 seconds at 60fps)
 local CACHE_LIFETIME = 300
-
--- Bitwise operations compatibility
-local band = _VERSION >= "Lua 5.3" and function(a,b) return a & b end or bit.band
 
 -- Read and validate a pointer
 function Pointers.readPointer(name)
@@ -305,32 +295,6 @@ function Pointers.getPlayerInfo()
         money = Memory.read_u32_le(saveBlock1.money),
         coins = Memory.read_u16_le(saveBlock1.coins)
     }
-end
-
--- NEW: Get battle state
-function Pointers.getBattleState()
-    local battleFlags = Memory.read_u16_le(Pointers.addresses.gBattleTypeFlags)
-    if not battleFlags or battleFlags == 0 then
-        return nil  -- Not in battle
-    end
-    
-    return {
-        inBattle = true,
-        isWildBattle = band(battleFlags, 0x01) ~= 0,
-        isTrainerBattle = band(battleFlags, 0x08) ~= 0,
-        isDoubleBattle = band(battleFlags, 0x02) ~= 0,
-        flags = battleFlags
-    }
-end
-
--- NEW: Get enemy party address
-function Pointers.getEnemyPartyAddress()
-    -- Enemy party is at fixed offset from player party
-    local playerParty = Pointers.getPartyAddress()
-    if not playerParty then return nil end
-    
-    -- Enemy party is typically 0x4C0 bytes after player party
-    return playerParty + 0x4C0
 end
 
 -- Test function

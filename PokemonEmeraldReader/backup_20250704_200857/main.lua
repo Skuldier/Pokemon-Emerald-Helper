@@ -1,14 +1,12 @@
--- main.lua
+-- main_archipelago.lua
 -- Pokemon Emerald Memory Reader for BizHawk
 -- Modified to work with Archipelago and other patched ROMs
--- Now with battle display and tier ratings!
 
 -- Load modules
 local Memory = require("Memory")
 local ROMData = require("ROMData")
 local Pointers = require("Pointers")
 local PokemonReader = require("PokemonReader")
-local BattleDisplay = require("BattleDisplay")
 
 -- Optional JSON library for external output
 local hasJson, json = pcall(require, "json")
@@ -18,7 +16,6 @@ local Config = {
     -- Update intervals (in frames)
     updateInterval = 30,        -- Update display every 0.5 seconds (30 frames)
     fullUpdateInterval = 300,   -- Full update every 5 seconds
-    battleCheckInterval = 10,   -- Check for battles every 10 frames
     
     -- External output
     enableExternalOutput = false,
@@ -28,24 +25,12 @@ local Config = {
     showDetailedStats = true,
     showMoves = true,
     showIVsEVs = false,
-    showBattleInfo = true,
-    showTypeEffectiveness = true,
-    showTierBreakdown = true,
     
     -- Performance
     cacheLifetime = 300,        -- 5 seconds
     
     -- Archipelago mode
     archipelagoMode = false,    -- Set to true if patch detected
-    
-    -- Tier symbols
-    tierSymbols = {
-        S = "⭐",
-        A = "✨",
-        B = "👍",
-        C = "⚡",
-        D = "⚠️"
-    }
 }
 
 -- State tracking
@@ -53,13 +38,11 @@ local State = {
     frameCount = 0,
     lastUpdate = 0,
     lastFullUpdate = 0,
-    lastBattleCheck = 0,
     isInitialized = false,
     
     -- Current data
     party = nil,
     playerInfo = nil,
-    currentBattle = nil,
     
     -- Statistics
     startTime = os.clock(),
@@ -181,58 +164,9 @@ function init()
     return true
 end
 
--- Check for battles
-function checkBattle()
-    -- Only check periodically
-    if State.frameCount - State.lastBattleCheck < Config.battleCheckInterval then
-        return
-    end
-    
-    State.lastBattleCheck = State.frameCount
-    
-    local enemyPokemon, battleState = BattleDisplay.readEnemyPokemon()
-    
-    if enemyPokemon and battleState then
-        -- New battle detected
-        if not State.currentBattle or State.currentBattle.species ~= enemyPokemon.species then
-            State.currentBattle = enemyPokemon
-            
-            -- Clear console and show battle info
-            console.clear()
-            
-            if battleState.isWildBattle then
-                BattleDisplay.displayWildEncounter(enemyPokemon)
-                
-                -- Show type effectiveness if we have a lead Pokemon
-                if State.party and State.party.pokemon[1] then
-                    local playerPokemon = State.party.pokemon[1]
-                    if playerPokemon.baseData and enemyPokemon.baseData then
-                        BattleDisplay.displayTypeEffectiveness(
-                            {playerPokemon.baseData.type1, playerPokemon.baseData.type2},
-                            {enemyPokemon.baseData.type1, enemyPokemon.baseData.type2}
-                        )
-                    end
-                end
-                
-                -- Add a divider before regular party display
-                console.log("\n" .. string.rep("-", 50) .. "\n")
-            elseif battleState.isTrainerBattle then
-                BattleDisplay.displayTrainerBattle(enemyPokemon)
-            end
-        end
-    else
-        State.currentBattle = nil
-    end
-end
-
 -- Update game data
 function update()
     State.frameCount = State.frameCount + 1
-    
-    -- Check for battles
-    if Config.showBattleInfo then
-        checkBattle()
-    end
     
     -- Quick update (every updateInterval frames)
     if State.frameCount - State.lastUpdate >= Config.updateInterval then
@@ -253,10 +187,8 @@ function quickUpdate()
     State.party = PokemonReader.readParty()
     State.totalReads = State.totalReads + 1
     
-    -- Update display (only if not in battle)
-    if not State.currentBattle then
-        displayParty()
-    end
+    -- Update display
+    displayParty()
     
     -- External output if enabled
     if Config.enableExternalOutput and hasJson then
@@ -409,8 +341,7 @@ function outputData()
         frameCount = State.frameCount,
         player = State.playerInfo,
         party = State.party,
-        archipelago = Config.archipelagoMode,
-        battle = State.currentBattle
+        archipelago = Config.archipelagoMode
     }
     
     local success, jsonStr = pcall(json.encode, data)
@@ -448,11 +379,6 @@ function handleInput()
         console.log("External output: " .. (Config.enableExternalOutput and "ON" or "OFF"))
     end
     
-    if keys["B"] then
-        Config.showBattleInfo = not Config.showBattleInfo
-        console.log("Battle display: " .. (Config.showBattleInfo and "ON" or "OFF"))
-    end
-    
     if keys["R"] then
         -- Force refresh
         State.lastFullUpdate = 0
@@ -476,7 +402,6 @@ function main()
     console.log("M - Toggle move display")
     console.log("I - Toggle IV/EV display")
     console.log("E - Toggle external output")
-    console.log("B - Toggle battle display")
     console.log("R - Force refresh")
     console.log("\nStarting in 3 seconds...")
     
