@@ -386,6 +386,18 @@ function Pointers.test()
             console.log(string.format("  Slot %d: 0x%08X", i + 1, addr))
         end
     end
+    
+    -- Test battle functions
+    console.log("\nBattle functions test:")
+    console.log("- getBattleState: " .. (Pointers.getBattleState and "✓ Available" or "✗ Missing"))
+    console.log("- getEnemyPartyAddress: " .. (Pointers.getEnemyPartyAddress and "✓ Available" or "✗ Missing"))
+    
+    local battleState = Pointers.getBattleState()
+    if battleState then
+        console.log("  Currently in battle!")
+    else
+        console.log("  Not in battle")
+    end
 end
 
 return Pointers
